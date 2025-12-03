@@ -1,0 +1,128 @@
+.badge {
+  padding: 0.25rem 0.5rem;
+  border-radius: 0.4rem;
+  font-weight: 600;
+}
+
+.status-pass {
+  background: #065f46;
+  color: #ccfbf1;
+}
+
+.status-warning {
+  background: #92400e;
+  color: #fef3c7;
+}
+
+.status-fail {
+  background: #7f1d1d;
+  color: #fecaca;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+}
+
+th, td {
+  padding: 0.5rem;
+  border-bottom: 1px solid #2d3748;
+}
+
+tbody tr:hover {
+  background: #1f2937;
+}
+
+.summary-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.chip {
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.chip-total {
+  background: #374151;
+  color: #e5e7eb;
+}
+
+.chip-pass {
+  background: #065f46;
+  color: #ccfbf1;
+}
+
+.chip-warning {
+  background: #92400e;
+  color: #fef3c7;
+}
+
+.chip-fail {
+  background: #7f1d1d;
+  color: #fecaca;
+}
+
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+  font-size: 0.85rem;
+}
+
+.filter-btn {
+  border: 1px solid #4b5563;
+  background: #111827;
+  color: #e5e7eb;
+  border-radius: 999px;
+  padding: 0.15rem 0.7rem;
+  cursor: pointer;
+  font-size: 0.8rem;
+}
+
+.filter-btn.active {
+  background: #2563eb;
+  border-color: #2563eb;
+}
+
+.filter-btn:hover {
+  filter: brightness(1.1);
+}
+
+.group-card {
+  margin-top: 1rem;
+}
+
+.qa-table {
+  width: 100%;
+}
+
+/* Colorear filas según status */
+.row-status-pass {
+  background: rgba(6, 95, 70, 0.12);
+}
+
+.row-status-warning {
+  background: rgba(146, 64, 14, 0.12);
+}
+
+.row-status-fail {
+  background: rgba(127, 29, 29, 0.18);
+}
+
+.row-status-unknown {
+  background: rgba(55, 65, 81, 0.3);
+}
+
+tbody tr.row-status-pass:hover,
+tbody tr.row-status-warning:hover,
+tbody tr.row-status-fail:hover,
+tbody tr.row-status-unknown:hover {
+  filter: brightness(1.1);
+}

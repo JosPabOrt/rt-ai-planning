@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+
+{% block title %}RT-AI QA Home{% endblock %}
+
+{% block content %}
+
+<section class="card">
+  <h2>Ejecutar QA</h2>
+
+  <form method="post" action="/run" class="form-grid">
+
+    <div class="form-field">
+      <label for="data_root">Data root</label>
+      <input type="text" id="data_root" name="data_root"
+             placeholder="/home/josepablo/rt-ai-planning/data_raw"
+             value="{{ data_root if data_root else '' }}" required>
+    </div>
+
+    <div class="form-field">
+      <label for="patient_id">Patient ID</label>
+      <input type="text" id="patient_id" name="patient_id"
+             placeholder="patient_001"
+             value="{{ patient_id if patient_id else '' }}" required>
+    </div>
+
+    <div class="form-actions">
+      <button type="submit">Run QA</button>
+    </div>
+
+  </form>
+</section>
+
+{% if error %}
+<section class="card" style="background:#7f1d1d; color:#fecaca;">
+  <h3>Error:</h3>
+  <p>{{ error }}</p>
+</section>
+{% endif %}
+
+{% if result %}
+<section class="card">
+  <h2>Resumen del caso</h2>
+  <p>Paciente: <strong>{{ result.patient_id }}</strong></p>
+  <p>Score total: <strong>{{ result.total_score }}</strong></p>
+  <p>
+    Estado global:
+    <span class="badge status-{{ result.status|lower }}">
+      {{ result.status }}
+    </span>
+  </p>
+
+  {% if result.summary %}
+  <div class="summary-row">
+    <span class="chip chip-total">
+      Total checks: {{ result.summary.total }}
+    </span>
+    <span class="chip chip-pass">
+      PASS: {{ result.summary.pass }}
+    </span>
+    <span class="chip chip-warning">
+      WARNING: {{ result.summary.warning }}
+    </span>
+    <span class="chip chip-fail">
+      FAIL: {{ result.summary.fail }}
+    </span>
+  </div>
+  {% endif %}
+
+  <div class="filter-row">
+    <span>Filtro:</span>
+    <button type="button" class="filter-btn active" data-filter="ALL">
+      Todos
+    </button>
+    <button type="button" class="filter-btn" data-filter="NONPASS">
+      Solo WARNING + FAIL
+    </button>
+    <button type="button" class="filter-btn" data-filter="FAIL">
+      Solo FAIL
+    </button>
+  </div>
+</section>
+
+<section class="card">
+  <h2>Checks de QA por grupo</h2>
+
+  {% for grp in result.groups %}
+  <section class="group-card">
+    <h3>{{ grp.name }}</h3>
+    <table class="qa-table">
+      <thead>
+        <tr>
+          <th>Chequeo</th>
+          <th>Status</th>
+          <th>Puntaje</th>
+          <th>Mensaje</th>
+          <th>Recomendación</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for c in grp.checks %}
+        <tr class="row-status-{{ c.status|lower }}" data-status="{{ c.status|upper }}">
+          <td>{{ c.name }}</td>
+          <td>
+            <span class="badge status-{{ c.status|lower }}">
+              {{ c.status }}
+            </span>
+          </td>
+          <td>{{ c.score }}</td>
+          <td>{{ c.message }}</td>
+          <td>{{ c.recommendation }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+  {% endfor %}
+</section>
+{% endif %}
+
+<script>
+  (function () {
+    const buttons = document.querySelectorAll(".filter-btn");
+    const rows = document.querySelectorAll("tbody tr[data-status]");
+
+    function applyFilter(mode) {
+      rows.forEach(row => {
+        const status = row.dataset.status || "UNKNOWN";
+        let visible = true;
+
+        if (mode === "FAIL") {
+          visible = (status === "FAIL");
+        } else if (mode === "NONPASS") {
+          visible = (status !== "PASS");
+        } else {
+          visible = true; // ALL
+        }
+
+        row.style.display = visible ? "" : "none";
+      });
+    }
+
+    buttons.forEach(btn => {
+      btn.addEventListener("click", () => {
+        const mode = btn.dataset.filter || "ALL";
+
+        buttons.forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+
+        applyFilter(mode);
+      });
+    });
+  })();
+</script>
+
+{% endblock %}
