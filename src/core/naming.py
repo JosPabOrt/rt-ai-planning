@@ -5,8 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import Dict, List, Tuple, Optional
-
+from typing import Dict, List, Tuple, Optional, Any
 
 # ============================================
 # 1) Tipos y dataclass para el naming
@@ -172,46 +171,36 @@ def _canonical_from_clean(clean: str) -> Tuple[str, StructCategory]:
 
 
 # ============================================================
-# Inferencia de sitio anatómico a partir de los nombres de ROIs
+# Inferencia simple de sitio anatómico a partir de estructuras
 # ============================================================
 
-def infer_site_from_structs(struct_names: list[str]) -> str | None:
+# Puedes ajustar/expandir esto más adelante en config.py si quieres
+_SITE_PATTERNS = {
+    "PROSTATE": ["PROST", "PTV_46", "PTV_78", "CTV_46", "CTV_78"],
+    "BREAST": ["MAMA", "BREAST"],
+    "BRAIN": ["BRAIN", "CRANIO", "CEREB"],
+    "LUNG": ["LUNG", "PULMON"],
+    "RECTUM": ["RECTUM", "RECTO"],
+    "PELVIS": ["PELVIS", "SACRUM"],
+}
+
+def infer_site_from_structs(struct_names) -> str | None:
     """
-    Intenta inferir el sitio anatómico principal (PROSTATE, BREAST, LUNG, etc.)
-    a partir de la lista de nombres de estructuras.
+    Inferencia muy simple de 'site' clínico a partir de la lista de nombres
+    de estructuras (tal como vienen en case.structs.keys()).
 
-    Esto NO es definitivo ni mágico, sólo un heurístico inicial.
-    Lo puedes ampliar cuando empieces a soportar más sitios.
+    Devuelve algo como "PROSTATE", "BREAST", etc., o None si no reconoce
+    ningún patrón.
     """
-    names_up = [n.upper() for n in struct_names]
+    upper_names = [s.upper() for s in struct_names]
 
-    # Próstata
-    if any("PROST" in n for n in names_up):
-        return "PROSTATE"
+    for site, patterns in _SITE_PATTERNS.items():
+        for p in patterns:
+            if any(p in name for name in upper_names):
+                return site
 
-    # Mama
-    if any("MAMA" in n or "BREAST" in n for n in names_up):
-        return "BREAST"
-
-    # Pulmón
-    if any("LUNG" in n or "PULM" in n for n in names_up):
-        return "LUNG"
-
-    # Cabeza y cuello
-    if any(
-        ("HEAD" in n and "NECK" in n)
-        or "H&N" in n
-        or "H N" in n
-        for n in names_up
-    ):
-        return "HEAD_AND_NECK"
-
-    # Pelvis genérica (por si expandes más adelante)
-    if any("CERVIX" in n or "UTERUS" in n or "PELVIS" in n for n in names_up):
-        return "PELVIS"
-
-    # Si no encontramos nada claro:
     return None
+
 
 
 
@@ -291,6 +280,94 @@ def choose_primary_structure(
     )
 
     return candidates_sorted[0]
+
+
+
+
+# ============================================================
+# 8) REGLAS DE GEOMETRÍA DE BEAMS POR SITIO Y TÉCNICA
+#    (viven aquí en core.naming para evitar dependencias
+#     hacia qa.config y no crear ciclos de import)
+# ============================================================
+
+SITE_BEAM_RULES = {
+    "PROSTATE": {
+        "VMAT": {
+            "num_arcs_min": 1,
+            "num_arcs_max": 3,
+
+            "avoid_collimator_zero": True,
+            "collimator_min_deg": 10,      # evitar 0°/360°
+            "collimator_max_deg": 350,
+
+            "avoid_gantry_pause": True,    # arco "real", no arco supercorto
+            "min_arc_span_deg": 300,       # grados de gantry
+
+            "allowed_couch_angles": [0],   # pelvis → couch 0° casi siempre
+        },
+
+        "IMRT": {
+            "num_beams_min": 5,
+            "num_beams_max": 9,
+            "allowed_couch_angles": [0],
+        },
+
+        "3D": {
+            "num_beams_min": 2,
+            "num_beams_max": 4,
+            "allowed_couch_angles": [0],
+        },
+
+        "SBRT": {
+            "num_arcs_min": 1,
+            "num_arcs_max": 3,
+            "avoid_couch_collisions": True,
+            "allowed_couch_angles": [0, 10, 350],
+        },
+    },
+
+    # Perfil DEFAULT para cualquier otro sitio no reconocido
+    "DEFAULT": {
+        "ANY": {
+            "num_arcs_min": 0,
+            "num_arcs_max": 10,
+            "allowed_couch_angles": [0],
+        }
+    }
+}
+
+
+def get_beam_rules(site: Optional[str],
+                   technique: Optional[str]) -> Dict[str, Any]:
+    """
+    Devuelve las reglas de geometría de beams/arcos para (site, technique).
+
+    - site: p.ej. "PROSTATE" o None
+    - technique: p.ej. "VMAT", "IMRT", "3D", "SBRT" o None
+
+    Lógica:
+      1. Normaliza site → 'PROSTATE' / 'DEFAULT'
+      2. Busca reglas específicas para la técnica (VMAT/IMRT/3D/SBRT)
+      3. Si no hay, intenta 'ANY'
+      4. Si tampoco hay, devuelve {}
+    """
+    site_key = (site or "DEFAULT").upper()
+    site_rules = SITE_BEAM_RULES.get(site_key, SITE_BEAM_RULES["DEFAULT"])
+
+    tech_key = (technique or "ANY").upper()
+
+    # Regla específica para la técnica, si existe
+    if tech_key in site_rules:
+        return site_rules[tech_key]
+
+    # Fallback genérico ANY
+    if "ANY" in site_rules:
+        return site_rules["ANY"]
+
+    # Sin reglas definidas
+    return {}
+
+
 
 """
 utils_naming.py

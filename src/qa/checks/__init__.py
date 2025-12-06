@@ -1,36 +1,48 @@
-# srcfrom qa/engine/checks.py
+# src/qa/checks/__init__.py
 
 from typing import List
+
 from core.case import Case, CheckResult
 
-from . import checks_ct, checks_structures, checks_plan, checks_dose
+from . import ct, structures, plan, dose
 
 
 def run_all_checks(case: Case) -> List[CheckResult]:
-    print("[QA]   -> CT checks...")
-    results_ct = checks_ct.run_ct_checks(case)
-    print(f"[QA]   -> CT checks OK. Num={len(results_ct)}")
+    """
+    Orquestador de todos los checks de Auto-QA.
 
-    print("[QA]   -> Structure checks...")
-    results_struct = checks_structures.run_structural_checks(case)
-    print(f"[QA]   -> Structure checks OK. Num={len(results_struct)}")
-
-    print("[QA]   -> Plan checks...")
-    results_plan = checks_plan.run_plan_checks(case)
-    print(f"[QA]   -> Plan checks OK. Num={len(results_plan)}")
-
-    print("[QA]   -> Dose checks...")
-    results_dose = checks_dose.run_dose_checks(case)
-    print(f"[QA]   -> Dose checks OK. Num={len(results_dose)}")
-
+    Agrupa los checks en cuatro bloques:
+      - CT
+      - Structures
+      - Plan
+      - Dose
+    """
     results: List[CheckResult] = []
-    results.extend(results_ct)
-    results.extend(results_struct)
-    results.extend(results_plan)
-    results.extend(results_dose)
+
+    # --- CT ---
+    results.append(ct.check_ct_geometry(case))
+
+    # --- Structures ---
+    # Ajusta aquí si tu módulo `structures` usa otro nombre:
+    # por ejemplo `run_structural_checks` o similar.
+    if hasattr(structures, "run_structural_checks"):
+        results.extend(structures.run_structural_checks(case))
+    else:
+        # Si tienes checks sueltos, puedes llamarlos uno por uno:
+        # results.append(structures.check_mandatory_structures(case))
+        # results.append(structures.check_ptv_volume(case))
+        # etc.
+        pass
+
+    # --- Plan ---
+    if hasattr(plan, "run_plan_checks"):
+        results.extend(plan.run_plan_checks(case))
+
+    # --- Dose ---
+    if hasattr(dose, "run_dose_checks"):
+        results.extend(dose.run_dose_checks(case))
 
     return results
-
 
 
 """

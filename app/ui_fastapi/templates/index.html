@@ -1,155 +1,416 @@
-{% extends "base.html" %}
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Halcyon QA – Panel</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+</head>
+<body>
+<div class="page">
 
-{% block title %}RT-AI QA Home{% endblock %}
+    <!-- CABECERA / FORM -->
+    <header class="header">
+      <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+        <div>
+          <h1>Halcyon QA – Panel</h1>
+          <p class="subtitle">Prototype · FastAPI</p>
+        </div>
+        <button id="theme_toggle" type="button" class="btn-ghost">
+            🌙 Dark mode
+        </button>
+     </div>
 
-{% block content %}
+        <form method="post" action="/run" class="run-form">
+            <div class="form-row">
+                <label for="data_root">Data root</label>
+                <input type="text" id="data_root" name="data_root"
+                       value="{{ data_root or '' }}" required>
+            </div>
+            <div class="form-row">
+                <label for="patient_id">Patient ID</label>
+                <input type="text" id="patient_id" name="patient_id"
+                       value="{{ patient_id or '' }}" required>
+            </div>
+            <button type="submit" class="btn-primary">Run QA</button>
+        </form>
+    </header>
 
-<section class="card">
-  <h2>Ejecutar QA</h2>
+    {% if error %}
+        <div class="alert alert-error">
+            <strong>Error:</strong> {{ error }}
+        </div>
+    {% endif %}
 
-  <form method="post" action="/run" class="form-grid">
+    {% if result %}
 
-    <div class="form-field">
-      <label for="data_root">Data root</label>
-      <input type="text" id="data_root" name="data_root"
-             placeholder="/home/josepablo/rt-ai-planning/data_raw"
-             value="{{ data_root if data_root else '' }}" required>
-    </div>
+        <!-- RESUMEN GLOBAL -->
+        <section class="card summary-card">
+            <h2>Resumen del caso</h2>
+            <div class="summary-grid">
+                <div>
+                    <div class="summary-label">Paciente</div>
+                    <div class="summary-value">{{ result.patient_id }}</div>
+                </div>
+                <div>
+                    <div class="summary-label">Score total</div>
+                    <div class="summary-value">
+                        {{ "%.2f"|format(result.total_score or 0.0) }}
+                    </div>
+                </div>
+                <div>
+                    <div class="summary-label">Estado global</div>
+                    <div class="summary-value">
+                        <span class="chip chip-{{ (result.status or 'unknown')|lower }}">
+                            {{ result.status }}
+                        </span>
+                    </div>
+                </div>
+                <div class="summary-mini">
+                    <div class="summary-label">Checks</div>
+                    <div class="summary-badges">
+                        <span class="badge badge-pass">PASS: {{ result.summary.pass }}</span>
+                        <span class="badge badge-warn">WARN: {{ result.summary.warning }}</span>
+                        <span class="badge badge-fail">FAIL: {{ result.summary.fail }}</span>
+                    </div>
+                </div>
+            </div>
+            <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
+                <form method="get" action="/export/csv">
+                    <input type="hidden" name="data_root" value="{{ data_root }}">
+                    <input type="hidden" name="patient_id" value="{{ patient_id }}">
+                    <button type="submit" class="btn-ghost">Exportar CSV (Excel)</button>
+                </form>
 
-    <div class="form-field">
-      <label for="patient_id">Patient ID</label>
-      <input type="text" id="patient_id" name="patient_id"
-             placeholder="patient_001"
-             value="{{ patient_id if patient_id else '' }}" required>
-    </div>
+                <button type="button" class="btn-ghost" onclick="window.print();">
+                    Exportar PDF (imprimir)
+                </button>
+            </div>
+        </section>
 
-    <div class="form-actions">
-      <button type="submit">Run QA</button>
-    </div>
+        <!-- FILTROS -->
+        <section class="card filters-card">
+            <h2>Filtros</h2>
+            <div class="filters-grid">
+                <div class="filter-item">
+                    <label for="filter_text">Buscar</label>
+                    <input type="text" id="filter_text" placeholder="Texto libre…">
+                </div>
+                <div class="filter-item">
+                    <label for="filter_group">Grupo</label>
+                    <select id="filter_group">
+                        <option value="">Todos</option>
+                        {% for g in result.groups %}
+                            <option value="{{ g }}">{{ g }}</option>
+                        {% endfor %}
+                    </select>
+                </div>
+                <div class="filter-item">
+                    <label for="filter_status">Status</label>
+                    <select id="filter_status">
+                        <option value="">Todos</option>
+                        <option value="PASS">PASS</option>
+                        <option value="WARNING">WARNING</option>
+                        <option value="FAIL">FAIL</option>
+                    </select>
+                </div>
+            </div>
+        </section>
 
-  </form>
-</section>
+        <!-- TABLA ÚNICA CON GRUPOS -->
+        <section class="card">
+            <h2>Checks de QA por grupo</h2>
 
-{% if error %}
-<section class="card" style="background:#7f1d1d; color:#fecaca;">
-  <h3>Error:</h3>
-  <p>{{ error }}</p>
-</section>
-{% endif %}
+            <table class="qa-table qa-table-grouped">
+                <thead>
+                <tr>
+                    <th class="col-check">Chequeo</th>
+                    <th class="col-status">Status</th>
+                    <th class="col-score">Puntaje</th>
+                    <th class="col-message">Mensaje</th>
+                    <th class="col-reco">Recomendación</th>
+                </tr>
+                </thead>
 
-{% if result %}
-<section class="card">
-  <h2>Resumen del caso</h2>
-  <p>Paciente: <strong>{{ result.patient_id }}</strong></p>
-  <p>Score total: <strong>{{ result.total_score }}</strong></p>
-  <p>
-    Estado global:
-    <span class="badge status-{{ result.status|lower }}">
-      {{ result.status }}
-    </span>
-  </p>
+                {% for group, rows in result.grouped_checks.items() %}
+                    <tbody>
+                    <!-- Encabezado de grupo (una fila que ocupa todas las columnas) -->
+                    <tr class="group-header-row">
+                        <td class="group-header-cell" colspan="5">
+                            {{ group }}
+                        </td>
+                    </tr>
 
-  {% if result.summary %}
-  <div class="summary-row">
-    <span class="chip chip-total">
-      Total checks: {{ result.summary.total }}
-    </span>
-    <span class="chip chip-pass">
-      PASS: {{ result.summary.pass }}
-    </span>
-    <span class="chip chip-warning">
-      WARNING: {{ result.summary.warning }}
-    </span>
-    <span class="chip chip-fail">
-      FAIL: {{ result.summary.fail }}
-    </span>
-  </div>
-  {% endif %}
+                      {% for row in rows %}
+                        <tr class="qa-row"
+                            data-group="{{ row.group }}"
+                            data-status="{{ row.status }}"
+                            data-text="{{ (row.name ~ ' ' ~ row.message ~ ' ' ~ row.recommendation)|lower }}"
+                            data-name="{{ row.name }}"
+                            data-score="{{ row.score }}"
+                            data-message="{{ row.message|default('', true)|e }}"
+                            data-reco="{{ row.recommendation|default('', true)|e }}"
+                            title="{{ row.message|replace('\n', ' ') }}">
 
-  <div class="filter-row">
-    <span>Filtro:</span>
-    <button type="button" class="filter-btn active" data-filter="ALL">
-      Todos
-    </button>
-    <button type="button" class="filter-btn" data-filter="NONPASS">
-      Solo WARNING + FAIL
-    </button>
-    <button type="button" class="filter-btn" data-filter="FAIL">
-      Solo FAIL
-    </button>
-  </div>
-</section>
+                            <!-- Nombre -->
+                            <td class="cell-check">{{ row.name }}</td>
 
-<section class="card">
-  <h2>Checks de QA por grupo</h2>
+                            <!-- Status con chip -->
+                            <td class="cell-status">
+                                <span class="chip chip-{{ row.status|lower }}">
+                                    {{ row.status }}
+                                </span>
+                            </td>
 
-  {% for grp in result.groups %}
-  <section class="group-card">
-    <h3>{{ grp.name }}</h3>
-    <table class="qa-table">
-      <thead>
-        <tr>
-          <th>Chequeo</th>
-          <th>Status</th>
-          <th>Puntaje</th>
-          <th>Mensaje</th>
-          <th>Recomendación</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for c in grp.checks %}
-        <tr class="row-status-{{ c.status|lower }}" data-status="{{ c.status|upper }}">
-          <td>{{ c.name }}</td>
-          <td>
-            <span class="badge status-{{ c.status|lower }}">
-              {{ c.status }}
-            </span>
-          </td>
-          <td>{{ c.score }}</td>
-          <td>{{ c.message }}</td>
-          <td>{{ c.recommendation }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
-  </section>
-  {% endfor %}
-</section>
-{% endif %}
+                            <!-- Puntaje -->
+                            <td class="cell-score">
+                                {% if row.score is not none %}
+                                    {{ "%.1f"|format(row.score) }}
+                                {% else %}
+                                    —
+                                {% endif %}
+                            </td>
 
+                            <!-- Mensaje -->
+                            <td class="cell-message">
+                                {% if row.message %}
+                                    <div class="msg-line">
+                                        {{ row.message
+                                           |replace('\n', ' ')
+                                           |replace('|', '<br>')
+                                           |safe }}
+                                    </div>
+                                {% endif %}
+                            </td>
+
+                            <!-- Recomendación -->
+                            <td class="cell-reco">
+                                {% if row.recommendation %}
+                                    <div class="reco-line">
+                                        {{ row.recommendation
+                                           |replace('\n', ' ')
+                                           |replace('|', '<br>• ')
+                                           |safe }}
+                                    </div>
+                                {% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                {% endfor %}
+            </table>
+        </section>
+
+    {% else %}
+        <p class="empty-hint">
+            Ejecuta un QA para ver el resumen y los checks.
+        </p>
+    {% endif %}
+</div>
+
+<!-- JS de filtros -->
 <script>
-  (function () {
-    const buttons = document.querySelectorAll(".filter-btn");
-    const rows = document.querySelectorAll("tbody tr[data-status]");
+    (function () {
+        const textInput = document.getElementById('filter_text');
+        const groupSelect = document.getElementById('filter_group');
+        const statusSelect = document.getElementById('filter_status');
 
-    function applyFilter(mode) {
-      rows.forEach(row => {
-        const status = row.dataset.status || "UNKNOWN";
-        let visible = true;
+        function updateGroupHeaders() {
+            // Para cada <tbody> (cada grupo) vemos si tiene alguna fila visible
+            const tbodies = document.querySelectorAll('.qa-table-grouped tbody');
 
-        if (mode === "FAIL") {
-          visible = (status === "FAIL");
-        } else if (mode === "NONPASS") {
-          visible = (status !== "PASS");
-        } else {
-          visible = true; // ALL
+            tbodies.forEach(tb => {
+                const headerRow = tb.querySelector('.group-header-row');
+                const dataRows = tb.querySelectorAll('.qa-row');
+
+                let anyVisible = false;
+                dataRows.forEach(r => {
+                    if (r.style.display !== 'none') {
+                        anyVisible = true;
+                    }
+                });
+
+                // Mostrar u ocultar el encabezado de grupo
+                if (headerRow) {
+                    headerRow.style.display = anyVisible ? '' : 'none';
+                }
+            });
         }
 
-        row.style.display = visible ? "" : "none";
-      });
-    }
+        function applyFilters() {
+            const text = (textInput?.value || '').toLowerCase();
+            const group = groupSelect?.value || '';
+            const status = statusSelect?.value || '';
 
-    buttons.forEach(btn => {
-      btn.addEventListener("click", () => {
-        const mode = btn.dataset.filter || "ALL";
+            const rows = document.querySelectorAll('.qa-row');
+            rows.forEach(row => {
+                const rowText = row.getAttribute('data-text') || '';
+                const rowGroup = row.getAttribute('data-group') || '';
+                const rowStatus = row.getAttribute('data-status') || '';
 
-        buttons.forEach(b => b.classList.remove("active"));
-        btn.classList.add("active");
+                let visible = true;
 
-        applyFilter(mode);
-      });
-    });
+                if (text && !rowText.includes(text)) visible = false;
+                if (group && rowGroup !== group) visible = false;
+                if (status && rowStatus !== status) visible = false;
+
+                row.style.display = visible ? '' : 'none';
+            });
+
+            // Después de aplicar filtros, actualizamos secciones
+            updateGroupHeaders();
+        }
+
+        if (textInput) textInput.addEventListener('input', applyFilters);
+        if (groupSelect) groupSelect.addEventListener('change', applyFilters);
+        if (statusSelect) statusSelect.addEventListener('change', applyFilters);
+
+        // Por si acaso queremos estado coherente al cargar
+        updateGroupHeaders();
+    })();
+</script>
+
+
+<!-- Guardar modo oscuro/claro -->
+<script>
+  (function () {
+      const toggle = document.getElementById('theme_toggle');
+      const body   = document.body;
+
+      // Cargar preferencia previa
+      const stored = window.localStorage.getItem('qa_theme');
+      if (stored === 'dark') {
+          body.classList.add('theme-dark');
+          if (toggle) toggle.textContent = '☀️ Light mode';
+      }
+
+      if (toggle) {
+          toggle.addEventListener('click', function () {
+              const isDark = body.classList.toggle('theme-dark');
+              window.localStorage.setItem('qa_theme', isDark ? 'dark' : 'light');
+              toggle.textContent = isDark ? '☀️ Light mode' : '🌙 Dark mode';
+          });
+      }
   })();
 </script>
 
-{% endblock %}
+
+<!-- ================= MODAL DETALLE QA ================= -->
+<div id="qa-modal" class="qa-modal" aria-hidden="true">
+  <div class="qa-modal-backdrop"></div>
+
+  <div class="qa-modal-content">
+    <div class="qa-modal-header">
+      <h3 id="qa-modal-title"></h3>
+      <button
+        id="qa-modal-close"
+        type="button"
+        class="btn-ghost"
+        aria-label="Cerrar"
+      >
+        ✕
+      </button>
+    </div>
+
+    <div id="qa-modal-body" class="qa-modal-body">
+      <!-- Aquí se inyecta el contenido dinámico -->
+    </div>
+  </div>
+</div>
+
+
+
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+    const modal      = document.getElementById("qa-modal");
+    const backdrop   = modal ? modal.querySelector(".qa-modal-backdrop") : null;
+    const modalTitle = document.getElementById("qa-modal-title");
+    const modalBody  = document.getElementById("qa-modal-body");
+    const modalClose = document.getElementById("qa-modal-close");
+
+    const rows = document.querySelectorAll("tr.qa-row");
+
+    if (!modal || !modalTitle || !modalBody) {
+        return; // por si algo no existe aún
+    }
+
+    // --- Iconito según estado ---
+    function statusIcon(status) {
+        const s = (status || "").toUpperCase();
+
+        if (s === "PASS") {
+            return '<span class="modal-status-icon modal-status-pass">✔</span>';
+        }
+        if (s === "FAIL") {
+            return '<span class="modal-status-icon modal-status-fail">✖</span>';
+        }
+        if (s.includes("WARN")) {
+            return '<span class="modal-status-icon modal-status-warn">!</span>';
+        }
+        return '<span class="modal-status-icon modal-status-unknown">?</span>';
+    }
+
+    // --- Abrir modal desde una fila ---
+    function openModal(row) {
+        const name   = row.dataset.name  || row.dataset.group || "Detalle de chequeo";
+        const status = row.dataset.status || "";
+        const score  = row.dataset.score  || "";
+        const msg    = (row.dataset.message || "").replace(/\n/g, "<br>");
+        const reco   = (row.dataset.reco || row.dataset.recommendation || "")
+                          .replace(/\n/g, "<br>");
+
+        // Título con iconito
+        modalTitle.innerHTML = statusIcon(status) + " " + name;
+
+        // Cuerpo del modal
+        let html = "";
+        if (status) {
+            html += `<p><strong>Status:</strong> ${status}</p>`;
+        }
+        if (score) {
+            html += `<p><strong>Puntaje:</strong> ${score}</p>`;
+        }
+        if (msg) {
+            html += `<p><strong>Mensaje:</strong><br>${msg}</p>`;
+        }
+        if (reco) {
+            html += `<p><strong>Recomendación:</strong><br>${reco}</p>`;
+        }
+        modalBody.innerHTML = html || "<p>Sin información adicional.</p>";
+
+        // Mostrar modal (activa flex + animación)
+        modal.classList.add("is-open");
+    }
+
+    function closeModal() {
+        modal.classList.remove("is-open");
+    }
+
+    // Click en cada fila de la tabla
+    rows.forEach((row) => {
+        row.addEventListener("click", () => openModal(row));
+    });
+
+    // Cerrar con botón de cerrar
+    if (modalClose) {
+        modalClose.addEventListener("click", closeModal);
+    }
+
+    // Cerrar al hacer click en el backdrop
+    if (backdrop) {
+        backdrop.addEventListener("click", closeModal);
+    }
+
+    // Cerrar con ESC
+    document.addEventListener("keydown", (ev) => {
+        if (ev.key === "Escape" && modal.classList.contains("is-open")) {
+            closeModal();
+        }
+    });
+});
+</script>
+
+
+
+
+</body>
+</html>

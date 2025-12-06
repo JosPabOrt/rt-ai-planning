@@ -1,187 +1,137 @@
-# srcfrom qa/engine/checks_dose.py
+# src/qa/checks/dose.py
+
 """
-checks_dose.py
+checks/dose.py
 ==============
 
-Checks relacionados con la dosis (RTDOSE, DVH, cobertura PTV, OARs, hotspots).
+Checks relacionados con la dosis 3D y DVHs.
 
-Este módulo asume que el objeto `Case` contiene la dosis 3D en Gy
-resampleada al grid del CT, almacenada en:
+Aquí viven cosas como:
 
-    case.metadata["dose_gy"]  -> np.ndarray [z, y, x] en Gy
+  - check_dose_loaded          → verificar que hay RTDOSE asociado
+  - check_ptv_coverage         → D95 del PTV, etc.
+  - check_hotspots_global      → Dmax global, V110%
+  - check_oars_dvh_basic       → DVH básicos de OARs (Rectum, Bladder, FemHeads)
 
-Opcionalmente, si el RTPLAN está bien parseado, también puede usar:
-
-    case.plan.total_dose_gy        (Gy)
-    case.plan.num_fractions        (int)
-    case.plan.dose_per_fraction_gy (Gy)
-
-Flujo general:
-
-  - check_dose_loaded:
-        verifica que exista dose_gy en el Case.
-
-  - check_ptv_coverage:
-        busca un PTV principal (más grande que contenga 'PTV'),
-        calcula D95 y lo compara contra la dosis de prescripción
-        (total_dose_gy si está disponible, si no usa el máximo en el PTV).
-
-  - check_oars_dvh_basic:
-        aplica reglas DVH simples para próstatas:
-           Rectum, Bladder, Femoral Heads (si presentes).
-
-  - check_hotspots_global:
-        evalúa Dmax y V110% (según la prescripción) en todo el volumen.
-
-`run_dose_checks` coordina la ejecución, y si no hay dosis cargada,
-solo devuelve el resultado de check_dose_loaded.
+Los umbrales y configuraciones vienen de qa.config:
+  - HOTSPOT_CONFIG
+  - DVH_LIMITS
+  - perfiles por sitio (SITE_PROFILES)
+  - recomendaciones (DOSE_RECOMMENDATIONS)
 """
 
-from typing import List, Optional, Dict, Tuple
+from __future__ import annotations
+
+from typing import List, Dict, Optional
 import numpy as np
 
 from core.case import Case, CheckResult, StructureInfo
+from core.naming import infer_site_from_structs
+from qa.config import (
+    get_hotspot_config,
+    get_dvh_limits_for_structs,
+    get_site_profile,
+    get_dose_recommendations,
+    format_recommendations_text,
+)
 
 
-# -------------------------------------------------------------------
+# =====================================================
 # Utils internos
-# -------------------------------------------------------------------
+# =====================================================
 
 def _get_dose_array(case: Case) -> Optional[np.ndarray]:
     """
-    Intenta extraer la dosis 3D (Gy) del Case.
+    Obtiene la matriz de dosis (Gy) del Case.
 
-    Convención actual:
-      - case.metadata["dose_gy"] : np.ndarray [z, y, x] en Gy
+    Se asume que build_case_from_dicom guardó la dosis remuestreada
+    al grid del CT en:
 
-    Si no existe o no es un np.ndarray, devuelve None.
+        case.metadata["dose_gy"]
     """
     dose = case.metadata.get("dose_gy", None)
     if dose is None:
         return None
-    if not isinstance(dose, np.ndarray):
-        return None
     return dose
-
-
-def _find_ptv_struct(case: Case) -> Optional[StructureInfo]:
-    """
-    Encuentra un PTV "principal" de forma heurística:
-
-    1) Candidatos: estructuras cuyo nombre contenga 'PTV' (case-insensitive).
-    2) De esos, elige el de mayor volumen.
-    3) Ignora estructuras que parezcan puramente auxiliares (OPTI, RING, ZPTV...).
-
-    Esta lógica se puede reemplazar posteriormente por algo más sofisticado
-    o apoyarse en utils_naming si quieres unificarlo.
-    """
-    candidates: List[StructureInfo] = []
-
-    for name, st in case.structs.items():
-        name_up = name.upper()
-        if "PTV" not in name_up:
-            continue
-
-        # Filtra helpers tipo OPTI, RING, ZPTV, etc.
-        if any(h in name_up for h in ["OPTI", "RING", "ZPTV", "SHELL"]):
-            continue
-
-        candidates.append(st)
-
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda s: s.volume_cc, reverse=True)
-    return candidates[0]
-
-
-def _find_oar_candidate(
-    case: Case,
-    patterns: List[str],
-    exclude_helpers: bool = True
-) -> Optional[StructureInfo]:
-    """
-    Busca una estructura candidata OAR cuyo nombre contenga alguno de los
-    patrones dados (ej. ["RECT", "RECTO"] para recto).
-
-    Si `exclude_helpers` es True, ignora estructuras con sufijos típicos
-    de helpers (OPTI, RING, SHELL, etc).
-
-    Entre los candidatos, elige el de mayor volumen.
-    """
-    candidates: List[StructureInfo] = []
-
-    for name, st in case.structs.items():
-        name_up = name.upper()
-        if not any(pat in name_up for pat in patterns):
-            continue
-
-        if exclude_helpers and any(h in name_up for h in ["OPTI", "RING", "SHELL", "ZPTV"]):
-            continue
-
-        candidates.append(st)
-
-    if not candidates:
-        return None
-
-    candidates.sort(key=lambda s: s.volume_cc, reverse=True)
-    return candidates[0]
-
-
-def _compute_Dx(dose_vals: np.ndarray, x_percent: float) -> float:
-    """
-    Devuelve D_x (Gy): dosis mínima recibida por x% del volumen.
-
-    Implementación:
-      - ordena dosis ascendente
-      - D_x = valor en el percentil (100 - x) (porque queremos la dosis
-        por debajo de la cual está (100-x)% y por encima está x%).
-    """
-    if dose_vals.size == 0:
-        return 0.0
-
-    sorted_vals = np.sort(dose_vals)  # ascendente
-    p = 100.0 - x_percent
-    p = min(max(p, 0.0), 100.0)
-    return float(np.percentile(sorted_vals, p))
 
 
 def _compute_Vx(dose_vals: np.ndarray, x_gy: float) -> float:
     """
-    Devuelve V_x (fracción del volumen con dosis >= x_gy).
-
-    Si quieres V_x en porcentaje, multiplica el resultado por 100.
+    Devuelve la fracción de voxeles con dosis >= x_gy.
     """
     if dose_vals.size == 0:
         return 0.0
-    frac = np.mean(dose_vals >= x_gy)
-    return float(frac)
+    return float(np.mean(dose_vals >= x_gy))
 
 
-def _get_prescription_dose(case: Case, ptv_dose_vals: np.ndarray) -> float:
+def _compute_Dx(dose_vals: np.ndarray, x_percent: float) -> float:
     """
-    Estima la dosis de prescripción del plan.
-
-    Orden de preferencia:
-      1) Si case.plan.total_dose_gy está definido, úsalo.
-      2) Si no, usa el percentil 98 de la dosis en el PTV (aprox. D2%).
+    Devuelve D_x%: la dosis tal que x% del volumen recibe al menos esa dosis.
+    Ej: D95% → percentil 5 (porque el 95% del volumen está por encima).
     """
-    if case.plan is not None and case.plan.total_dose_gy is not None:
-        return float(case.plan.total_dose_gy)
-
-    if ptv_dose_vals.size == 0:
+    if dose_vals.size == 0:
         return 0.0
-
-    # Aproximación de prescripción: cerca de la dosis máxima en PTV
-    return float(np.percentile(ptv_dose_vals, 98.0))
-
-
+    # Percentil de cola
+    p = 100.0 - x_percent
+    return float(np.percentile(dose_vals, p))
 
 
+def _get_prescription_dose(case: Case,
+                           ptv_dose_vals: Optional[np.ndarray] = None) -> float:
+    """
+    Estima una dosis de prescripción de referencia (Gy).
 
-# -------------------------------------------------------------------
-# Checks de dosis cargada
-# -------------------------------------------------------------------
+    Orden de prioridad:
+      1) case.plan.total_dose_gy (si existe y > 0)
+      2) percentil 98 de la dosis en el PTV (si se pasó ptv_dose_vals)
+    """
+    # 1) Usar lo que venga del RTPLAN si está definido
+    if getattr(case, "plan", None) is not None:
+        if case.plan.total_dose_gy is not None and case.plan.total_dose_gy > 0:
+            return float(case.plan.total_dose_gy)
+
+    # 2) Estimar por DVH del PTV
+    if ptv_dose_vals is not None and ptv_dose_vals.size > 0:
+        return float(np.percentile(ptv_dose_vals, 98.0))
+
+    return 0.0
+
+
+def _find_ptv_struct(case: Case) -> Optional[StructureInfo]:
+    """
+    Encuentra un PTV "principal" de forma sencilla:
+      - cualquier estructura cuyo nombre contenga 'PTV' (en mayúsculas),
+      - si hay varias, elige la de mayor volumen.
+    """
+    candidates: List[StructureInfo] = []
+    for name, st in case.structs.items():
+        if "PTV" in name.upper():
+            candidates.append(st)
+
+    if not candidates:
+        return None
+
+    # Elegimos la de mayor volumen
+    candidates.sort(key=lambda s: s.volume_cc, reverse=True)
+    return candidates[0]
+
+
+def _find_oar_candidate(case: Case, patterns: List[str]) -> Optional[StructureInfo]:
+    """
+    Devuelve la primera estructura cuyo nombre (en mayúsculas)
+    contenga alguno de los patrones dados.
+    """
+    pats = [p.upper() for p in patterns]
+    for name, st in case.structs.items():
+        u = name.upper()
+        if any(pat in u for pat in pats):
+            return st
+    return None
+
+
+# =====================================================
+# 1) Dosis cargada
+# =====================================================
 
 def check_dose_loaded(case: Case) -> CheckResult:
     """
@@ -191,18 +141,16 @@ def check_dose_loaded(case: Case) -> CheckResult:
     """
     dose = _get_dose_array(case)
     if dose is None:
-        rec = (
-            "Exportar el RTDOSE desde el TPS y asegurarse de cargarlo en el pipeline "
-            "(build_case_from_dicom con rtdose_path válido). Verificar que el RTDOSE "
-            "corresponda al mismo CT/RTPLAN para poder evaluar DVHs y cobertura."
-        )
+        rec_texts = get_dose_recommendations("DOSE_LOADED", "NO_DOSE")
+        rec = format_recommendations_text(rec_texts)
+
         return CheckResult(
             name="Dose loaded",
             passed=False,
             score=0.2,
             message=(
                 "No se encontró dosis en el Case (metadata['dose_gy']). "
-                "No se pueden evaluar DVHs."
+                "No se pueden evaluar DVHs ni hotspots."
             ),
             details={},
             group="Dose",
@@ -210,11 +158,9 @@ def check_dose_loaded(case: Case) -> CheckResult:
         )
 
     if dose.shape != case.ct_hu.shape:
-        rec = (
-            "Revisar el remuestreo de dosis al grid del CT (resample_dose_to_ct) y que "
-            "el RTDOSE original tenga la misma referencia geométrica que el CT de simulación. "
-            "Comprobar también que no se esté usando un RTDOSE de otro estudio o serie."
-        )
+        rec_texts = get_dose_recommendations("DOSE_LOADED", "SHAPE_MISMATCH")
+        rec = format_recommendations_text(rec_texts)
+
         return CheckResult(
             name="Dose loaded",
             passed=False,
@@ -228,6 +174,9 @@ def check_dose_loaded(case: Case) -> CheckResult:
             recommendation=rec,
         )
 
+    rec_texts = get_dose_recommendations("DOSE_LOADED", "OK")
+    rec = format_recommendations_text(rec_texts)
+
     return CheckResult(
         name="Dose loaded",
         passed=True,
@@ -235,22 +184,16 @@ def check_dose_loaded(case: Case) -> CheckResult:
         message="Dosis cargada y consistente con el CT.",
         details={"dose_shape": dose.shape},
         group="Dose",
-        recommendation="",  # nada que recomendar si todo está ok
+        recommendation=rec,
     )
 
 
-
-
-
-
-
-# ----------------------------------------------------------------------------------------
-# Checks de cobertura del ptv
-# ----------------------------------------------------------------------------------------
-
+# =====================================================
+# 2) Cobertura del PTV (D95)
+# =====================================================
 
 def check_ptv_coverage(case: Case,
-                       target_D95_rel: float = 0.95) -> CheckResult:
+                       target_D95_rel: Optional[float] = None) -> CheckResult:
     """
     Evalúa la cobertura del PTV principal mediante D95.
 
@@ -268,11 +211,9 @@ def check_ptv_coverage(case: Case,
     """
     dose = _get_dose_array(case)
     if dose is None:
-        rec = (
-            "Verificar que el RTDOSE esté correctamente exportado desde el TPS y que "
-            "corresponda al mismo CT/RTPLAN. Sin volumen de dosis no se puede evaluar "
-            "la cobertura del PTV."
-        )
+        rec_texts = get_dose_recommendations("PTV_COVERAGE", "NO_DOSE")
+        rec = format_recommendations_text(rec_texts)
+
         return CheckResult(
             name="PTV coverage (D95)",
             passed=False,
@@ -285,11 +226,9 @@ def check_ptv_coverage(case: Case,
 
     ptv = _find_ptv_struct(case)
     if ptv is None:
-        rec = (
-            "Revisar que exista al menos una estructura PTV con un nombre reconocible "
-            "('PTV', 'PTV_46', etc.). Si usas nombres no estándar, amplía la lógica de "
-            "_find_ptv_struct o del módulo de naming para detectar el PTV principal."
-        )
+        rec_texts = get_dose_recommendations("PTV_COVERAGE", "NO_PTV")
+        rec = format_recommendations_text(rec_texts)
+
         return CheckResult(
             name="PTV coverage (D95)",
             passed=False,
@@ -304,11 +243,9 @@ def check_ptv_coverage(case: Case,
     ptv_dose_vals = dose[ptv_mask]
 
     if ptv_dose_vals.size == 0:
-        rec = (
-            f"Revisar el contorno del PTV '{ptv.name}' y la asociación CT–RTSTRUCT–RTDOSE. "
-            "La máscara resultó vacía; puede deberse a un desajuste de geometría o a un "
-            "error en el contorneo/exportación."
-        )
+        rec_texts = get_dose_recommendations("PTV_COVERAGE", "EMPTY_PTV_MASK")
+        rec = format_recommendations_text(rec_texts)
+
         return CheckResult(
             name="PTV coverage (D95)",
             passed=False,
@@ -324,15 +261,15 @@ def check_ptv_coverage(case: Case,
 
     presc = _get_prescription_dose(case, ptv_dose_vals)
     if presc <= 0:
+        # Sin buena referencia, evaluamos solo en términos absolutos
         msg = (
             f"D95(PTV)={D95:.2f} Gy, Dmax(PTV)={Dmax:.2f} Gy. "
             "No se pudo determinar una dosis de prescripción clara."
         )
-        rec = (
-            "Revisar la prescripción en el RTPLAN (DoseReferenceSequence/RTPrescriptionSequence) "
-            "y la lógica de _get_prescription_dose. Mientras tanto, interpretar D95 y Dmax en "
-            "términos absolutos (Gy) de acuerdo con el protocolo del servicio."
-        )
+
+        rec_texts = get_dose_recommendations("PTV_COVERAGE", "NO_PRESCRIPTION")
+        rec = format_recommendations_text(rec_texts)
+
         return CheckResult(
             name="PTV coverage (D95)",
             passed=True,
@@ -343,16 +280,33 @@ def check_ptv_coverage(case: Case,
             recommendation=rec,
         )
 
+    # ---------- Leer configuración de cobertura desde config.py ----------
+    site = infer_site_from_structs(case.structs.keys())
+    profile = get_site_profile(site)
+    cov_conf = profile.get("dose_coverage", {})
+
+    # Si no se pasó target_D95_rel explícito, usamos el de la config
+    if target_D95_rel is None:
+        target_D95_rel = float(cov_conf.get("target_D95_rel", 0.95))
+
+    warning_margin = float(cov_conf.get("warning_margin", 0.9))
+    score_ok = float(cov_conf.get("score_ok", 1.0))
+    score_warn = float(cov_conf.get("score_warn", 0.6))
+    score_fail = float(cov_conf.get("score_fail", 0.2))
+
     rel = D95 / presc
     passed = rel >= target_D95_rel
 
-    # Score ~1 si cumple, ~0.5 si un poco bajo, ~0.2 si muy bajo
+    # Score controlado por config (score_ok, score_warn, score_fail)
     if passed:
-        score = 1.0
-    elif rel >= 0.9 * target_D95_rel:
-        score = 0.6
+        score = score_ok
+        scenario = "OK"
+    elif rel >= warning_margin * target_D95_rel:
+        score = score_warn
+        scenario = "UNDER_COVERAGE"
     else:
-        score = 0.2
+        score = score_fail
+        scenario = "UNDER_COVERAGE"
 
     msg = (
         f"D95(PTV)={D95:.2f} Gy ({rel*100:.1f}% de {presc:.2f} Gy prescrito). "
@@ -360,15 +314,11 @@ def check_ptv_coverage(case: Case,
     )
     if passed:
         msg += "Cobertura PTV adecuada."
-        rec = ""
     else:
         msg += "Cobertura PTV por debajo del objetivo; revisar plan."
-        rec = (
-            "Considerar reoptimizar el plan aumentando la prioridad del PTV en el objetivo, "
-            "ajustando restricciones de OARs o modificando la geometría de arcos/campos. "
-            "Si la cobertura es muy baja, comprobar también que el PTV esté correctamente "
-            "contorneado y que no haya un desajuste de registro entre CT, RTSTRUCT y RTDOSE."
-        )
+
+    rec_texts = get_dose_recommendations("PTV_COVERAGE", scenario)
+    rec = format_recommendations_text(rec_texts)
 
     return CheckResult(
         name="PTV coverage (D95)",
@@ -387,34 +337,27 @@ def check_ptv_coverage(case: Case,
     )
 
 
+# =====================================================
+# 3) Hotspots globales
+# =====================================================
 
-
-# ----------------------------------------------------------------------------------------
-# Checks de hotspots
-# ----------------------------------------------------------------------------------------
-
-
-def check_hotspots_global(case: Case,
-                          max_rel_hotspot: float = 1.10) -> CheckResult:
+def check_hotspots_global(case: Case) -> CheckResult:
     """
     Evalúa hotspots globales en todo el volumen de dosis.
 
     - Usa la dosis de prescripción (case.plan.total_dose_gy o aproximación
       por percentil 98 del PTV si existe).
+    - Lee el hotspot máximo permitido desde la config (por sitio si aplica).
     - Calcula:
         Dmax_global
-        V110% (fracción de voxeles con dosis >= 110% de prescripción)
-    - Compara Dmax con max_rel_hotspot * prescripción.
-
-    `max_rel_hotspot` típico:
-        1.10  → 110% de la prescripción
+        Vhot (p.ej. V110%)
     """
+
     dose = _get_dose_array(case)
     if dose is None:
-        rec = (
-            "Asegurarse de exportar y asociar el RTDOSE correcto desde el TPS "
-            "y repetir la importación del caso antes de evaluar hotspots."
-        )
+        rec_texts = get_dose_recommendations("GLOBAL_HOTSPOTS", "NO_DOSE")
+        rec = format_recommendations_text(rec_texts)
+
         return CheckResult(
             name="Global hotspots",
             passed=False,
@@ -427,10 +370,9 @@ def check_hotspots_global(case: Case,
 
     dose_vals = dose.flatten()
     if dose_vals.size == 0:
-        rec = (
-            "Verificar que el RTDOSE exportado tenga un volumen 3D válido y que "
-            "la geometría de la dosis sea consistente con el CT."
-        )
+        rec_texts = get_dose_recommendations("GLOBAL_HOTSPOTS", "EMPTY_DOSE")
+        rec = format_recommendations_text(rec_texts)
+
         return CheckResult(
             name="Global hotspots",
             passed=False,
@@ -443,7 +385,7 @@ def check_hotspots_global(case: Case,
 
     Dmax_global = float(dose_vals.max())
 
-    # Para prescripción, si hay PTV, usamos su dosis aproximada
+    # ---------- Prescripción ----------
     ptv = _find_ptv_struct(case)
     ptv_dose_vals = dose[ptv.mask.astype(bool)] if ptv is not None else np.array([])
     presc = _get_prescription_dose(case, ptv_dose_vals)
@@ -453,11 +395,10 @@ def check_hotspots_global(case: Case,
             f"Dmax global={Dmax_global:.2f} Gy. "
             "No se pudo determinar prescripción; no se evalúa % de hotspot."
         )
-        rec = (
-            "Revisar que la prescripción esté correctamente registrada en el RTPLAN "
-            "(DoseReferenceSequence / RTPrescriptionSequence) y que el caso tenga un PTV "
-            "bien definido para poder evaluar hotspots relativos a la prescripción."
-        )
+
+        rec_texts = get_dose_recommendations("GLOBAL_HOTSPOTS", "NO_PRESCRIPTION")
+        rec = format_recommendations_text(rec_texts)
+
         return CheckResult(
             name="Global hotspots",
             passed=True,
@@ -468,35 +409,49 @@ def check_hotspots_global(case: Case,
             recommendation=rec,
         )
 
+    # ---------- Config de hotspot desde config.py (por sitio) ----------
+    site = infer_site_from_structs(case.structs.keys())
+    profile = get_site_profile(site)
+    hotspot_conf = profile.get("hotspot", get_hotspot_config())
+
+    max_rel_hotspot = float(hotspot_conf.get("max_rel_hotspot", 1.10))
+    Vhot_rel = float(hotspot_conf.get("Vhot_rel", 1.10))
+    delta_warn_rel = float(hotspot_conf.get("delta_warn_rel", 0.05))
+    score_ok = float(hotspot_conf.get("score_ok", 1.0))
+    score_warn = float(hotspot_conf.get("score_warn", 0.6))
+    score_fail = float(hotspot_conf.get("score_fail", 0.3))
+
     rel_Dmax = Dmax_global / presc
-    thr = max_rel_hotspot * presc
-    V110 = _compute_Vx(dose_vals, 1.10 * presc) * 100.0
+    Vhot = _compute_Vx(dose_vals, Vhot_rel * presc) * 100.0
+
+    # Etiqueta humana para el Vhot (p.ej. "V110%")
+    Vhot_label = f"V{int(round(Vhot_rel * 100))}%"
 
     passed = rel_Dmax <= max_rel_hotspot
 
     if passed:
-        score = 1.0
+        score = score_ok
+        scenario = "OK"
         msg = (
             f"Dmax global={Dmax_global:.2f} Gy ({rel_Dmax*100:.1f}% de {presc:.2f} Gy). "
-            f"V110%={V110:.2f}% del volumen. Hotspots dentro de rango razonable."
+            f"{Vhot_label}={Vhot:.2f}% del volumen. Hotspots dentro de rango razonable."
         )
-        rec = ""  # No hay acción necesaria
     else:
-        # Si se pasa mucho, degradar más
-        if rel_Dmax <= max_rel_hotspot + 0.05:
-            score = 0.6
+        # Si se pasa poco del límite → WARNING; si mucho → FAIL
+        if rel_Dmax <= max_rel_hotspot + delta_warn_rel:
+            score = score_warn
         else:
-            score = 0.3
+            score = score_fail
+
+        scenario = "HIGH_HOTSPOT"
         msg = (
             f"Dmax global={Dmax_global:.2f} Gy ({rel_Dmax*100:.1f}% de {presc:.2f} Gy) > "
             f"{max_rel_hotspot*100:.0f}% permitido. "
-            f"V110%={V110:.2f}% del volumen. Revisar hotspots."
+            f"{Vhot_label}={Vhot:.2f}% del volumen. Revisar hotspots."
         )
-        rec = (
-            "Revisar los focos de alta dosis (>110%) en el mapa de dosis y en los DVH; "
-            "considerar reoptimizar el plan ajustando pesos de objetivos y OARs, "
-            "o modificando la geometría de campos/arcos para reducir hotspots globales."
-        )
+
+    rec_texts = get_dose_recommendations("GLOBAL_HOTSPOTS", scenario)
+    rec = format_recommendations_text(rec_texts)
 
     return CheckResult(
         name="Global hotspots",
@@ -507,41 +462,35 @@ def check_hotspots_global(case: Case,
             "Dmax_Gy": Dmax_global,
             "prescription_Gy": presc,
             "rel_Dmax": rel_Dmax,
-            "V110_%": V110,
+            Vhot_label: Vhot,
         },
         group="Dose",
         recommendation=rec,
     )
 
 
-
-
-
-
-# ----------------------------------------------------------------------------------------
-# Checks de DVH de OARs
-# ----------------------------------------------------------------------------------------
-
+# =====================================================
+# 4) DVH básicos de OARs
+# =====================================================
 
 def check_oars_dvh_basic(case: Case) -> CheckResult:
     """
-    Evalúa DVH básicos para OARs en próstata:
+    Evalúa DVH básicos para OARs usando los límites definidos en config.DVH_LIMITS.
 
+    Ejemplo típico para PROSTATE (configurable en qa.config):
       - Rectum:  V70 < 20%, V60 < 35%
       - Bladder: V70 < 35%
       - Femoral heads (L/R): Dmax < 50 Gy
 
-    Umbrales orientativos (puedes ajustarlos según guías que prefieras).
-
-    Nota: Los checks se degradan si no se encuentra un OAR (pero no se
-    considera un FAIL total del caso).
+    Nota: Los checks se degradan si no se encuentra un OAR, pero no se
+    considera un FAIL total del caso por ausencia de una estructura.
     """
+
     dose = _get_dose_array(case)
     if dose is None:
-        rec = (
-            "Verificar que el RTDOSE esté correctamente exportado y asociado al CT/RTPLAN. "
-            "Sin volumen de dosis no es posible evaluar DVH de órganos de riesgo."
-        )
+        rec_texts = get_dose_recommendations("OAR_DVH_BASIC", "NO_DOSE")
+        rec = format_recommendations_text(rec_texts)
+
         return CheckResult(
             name="OAR DVH (basic)",
             passed=False,
@@ -551,6 +500,14 @@ def check_oars_dvh_basic(case: Case) -> CheckResult:
             group="Dose",
             recommendation=rec,
         )
+
+    # ---------- Límites DVH desde config.py ----------
+    struct_names = list(case.structs.keys())
+    dvh_limits = get_dvh_limits_for_structs(struct_names)
+
+    rect_limits = dvh_limits.get("RECTUM", {})
+    blad_limits = dvh_limits.get("BLADDER", {})
+    fem_limits = dvh_limits.get("FEMORAL_HEAD", {})
 
     details: Dict[str, Dict[str, float]] = {}
     issues: List[str] = []
@@ -562,17 +519,22 @@ def check_oars_dvh_basic(case: Case) -> CheckResult:
     if rect is not None:
         rect_dose = dose[rect.mask.astype(bool)]
         if rect_dose.size > 0:
-            V70 = _compute_Vx(rect_dose, 70.0) * 100.0
-            V60 = _compute_Vx(rect_dose, 60.0) * 100.0
-            details["Rectum"] = {"V70_%": V70, "V60_%": V60}
-            num_constraints += 2
+            # Sólo calculamos métricas que estén configuradas
+            if "V70_%" in rect_limits:
+                V70 = _compute_Vx(rect_dose, 70.0) * 100.0
+                details.setdefault("Rectum", {})["V70_%"] = V70
+                num_constraints += 1
+                if V70 > rect_limits["V70_%"]:
+                    num_violations += 1
+                    issues.append(f"Rectum V70={V70:.1f}% > {rect_limits['V70_%']:.1f}%")
 
-            if V70 > 20.0:
-                num_violations += 1
-                issues.append(f"Rectum V70={V70:.1f}% > 20%")
-            if V60 > 35.0:
-                num_violations += 1
-                issues.append(f"Rectum V60={V60:.1f}% > 35%")
+            if "V60_%" in rect_limits:
+                V60 = _compute_Vx(rect_dose, 60.0) * 100.0
+                details.setdefault("Rectum", {})["V60_%"] = V60
+                num_constraints += 1
+                if V60 > rect_limits["V60_%"]:
+                    num_violations += 1
+                    issues.append(f"Rectum V60={V60:.1f}% > {rect_limits['V60_%']:.1f}%")
     else:
         issues.append("No se encontró Rectum; no se evalúan restricciones rectales.")
 
@@ -581,13 +543,13 @@ def check_oars_dvh_basic(case: Case) -> CheckResult:
     if blad is not None:
         blad_dose = dose[blad.mask.astype(bool)]
         if blad_dose.size > 0:
-            V70 = _compute_Vx(blad_dose, 70.0) * 100.0
-            details["Bladder"] = {"V70_%": V70}
-            num_constraints += 1
-
-            if V70 > 35.0:
-                num_violations += 1
-                issues.append(f"Bladder V70={V70:.1f}% > 35%")
+            if "V70_%" in blad_limits:
+                V70 = _compute_Vx(blad_dose, 70.0) * 100.0
+                details.setdefault("Bladder", {})["V70_%"] = V70
+                num_constraints += 1
+                if V70 > blad_limits["V70_%"]:
+                    num_violations += 1
+                    issues.append(f"Bladder V70={V70:.1f}% > {blad_limits['V70_%']:.1f}%")
     else:
         issues.append("No se encontró Bladder/Vejiga; no se evalúan restricciones vesicales.")
 
@@ -599,57 +561,70 @@ def check_oars_dvh_basic(case: Case) -> CheckResult:
         if fem is None:
             issues.append(f"No se encontró {label}; no se evalúa Dmax.")
             continue
+
         fem_dose = dose[fem.mask.astype(bool)]
         if fem_dose.size == 0:
             continue
+
         Dmax = float(fem_dose.max())
         details[label] = {"Dmax_Gy": Dmax}
-        num_constraints += 1
-        if Dmax > 50.0:
-            num_violations += 1
-            issues.append(f"{label} Dmax={Dmax:.1f} Gy > 50 Gy")
+        if "Dmax_Gy" in fem_limits:
+            num_constraints += 1
+            if Dmax > fem_limits["Dmax_Gy"]:
+                num_violations += 1
+                issues.append(
+                    f"{label} Dmax={Dmax:.1f} Gy > {fem_limits['Dmax_Gy']:.1f} Gy"
+                )
 
-    # Si no pudimos evaluar nada útil
     if num_constraints == 0:
-        msg = (
-            "No se encontraron OARs clásicos (Rectum, Bladder, Fem Heads) para evaluar DVH."
-        )
-        rec = (
-            "Revisar que las estructuras de órganos de riesgo estén contorneadas y "
-            "nombradas de forma reconocible (Rectum, Bladder/Vejiga, Femoral heads). "
-            "También puedes ampliar la tabla de sinónimos en el módulo de naming."
-        )
+        # No pudimos evaluar nada útil
+        rec_texts = get_dose_recommendations("OAR_DVH_BASIC", "NO_CONSTRAINTS")
+        rec = format_recommendations_text(rec_texts)
+
         return CheckResult(
             name="OAR DVH (basic)",
             passed=False,
             score=0.4,
-            message=msg,
+            message=(
+                "No se encontraron OARs clásicos (Rectum, Bladder, femorales) "
+                "o no hay límites DVH configurados para este sitio."
+            ),
             details={"issues": issues, "metrics": details},
             group="Dose",
             recommendation=rec,
         )
 
-    # Evaluación de violaciones
-    passed = num_violations == 0
+    # Hasta aquí, hay al menos una métrica evaluada
+    passed = (num_violations == 0)
+
+    # ---------- Config de scoring DVH desde config.py ----------
+    site = infer_site_from_structs(case.structs.keys())
+    profile = get_site_profile(site)
+    dvh_scoring = profile.get("dvh_scoring", {})
+
+    frac_viol_warn = float(dvh_scoring.get("frac_viol_warn", 0.33))
+    score_ok = float(dvh_scoring.get("score_ok", 1.0))
+    score_warn = float(dvh_scoring.get("score_warn", 0.6))
+    score_fail = float(dvh_scoring.get("score_fail", 0.3))
 
     if passed:
-        score = 1.0
+        score = score_ok
+        scenario = "OK"
         msg = "DVH OARs básicos dentro de límites orientativos."
-        rec = ""  # No hay acción necesaria
     else:
         frac_viol = num_violations / max(1, num_constraints)
-        if frac_viol <= 0.33:
-            score = 0.6
+        if frac_viol <= frac_viol_warn:
+            score = score_warn
         else:
-            score = 0.3
+            score = score_fail
+
+        scenario = "WITH_VIOLATIONS"
         msg = "Se detectaron violaciones de límites DVH en uno o más OARs."
         if issues:
             msg += " " + " | ".join(issues)
-        rec = (
-            "Revisar los DVH de recto, vejiga y cabezas femorales; considerar reoptimizar el plan "
-            "ajustando pesos de objetivos/OARs, modificando la geometría de arcos/campos o, si aplica, "
-            "revisando contornos (especialmente si las violaciones parecen excesivas o no clínicas)."
-        )
+
+    rec_texts = get_dose_recommendations("OAR_DVH_BASIC", scenario)
+    rec = format_recommendations_text(rec_texts)
 
     return CheckResult(
         name="OAR DVH (basic)",
@@ -667,36 +642,23 @@ def check_oars_dvh_basic(case: Case) -> CheckResult:
     )
 
 
-
-
-# -----------------------------------------------------------------------------------------------------------------------------------
-# Orquestador
-# -----------------------------------------------------------------------------------------------------------------------------------
+# =====================================================
+# 5) Orquestador de checks de dosis
+# =====================================================
 
 def run_dose_checks(case: Case) -> List[CheckResult]:
     """
-    Orquesta los checks de dosis:
+    Orquestador de checks de dosis.
 
-      1) check_dose_loaded
-      2) Si hay dosis válida:
-            - check_ptv_coverage
-            - check_oars_dvh_basic
-            - check_hotspots_global
-
-    Si no hay dosis, solo devuelve el resultado de check_dose_loaded,
-    para no llenar el reporte con FAILs redundantes.
+    Por ahora ejecuta:
+      - check_dose_loaded
+      - check_ptv_coverage
+      - check_hotspots_global
+      - check_oars_dvh_basic
     """
     results: List[CheckResult] = []
-
-    dose_loaded_res = check_dose_loaded(case)
-    results.append(dose_loaded_res)
-
-    if not dose_loaded_res.passed:
-        # Sin dosis no tiene sentido correr el resto
-        return results
-
+    results.append(check_dose_loaded(case))
     results.append(check_ptv_coverage(case))
-    results.append(check_oars_dvh_basic(case))
     results.append(check_hotspots_global(case))
-
+    results.append(check_oars_dvh_basic(case))
     return results

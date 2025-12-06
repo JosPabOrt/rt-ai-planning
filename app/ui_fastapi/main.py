@@ -6,15 +6,21 @@ from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from fastapi.responses import StreamingResponse
+
+import io, csv
 
 # ==========================================================
-# AÑADIR src/ AL PYTHONPATH
+# AÑADIR src/ AL PYTHONPATH (desde app/ui_fastapi/main.py)
 # ==========================================================
-BASE_DIR = Path(__file__).resolve().parent       # .../src/app
-SRC_DIR = BASE_DIR.parent                        # .../src
+
+BASE_DIR = Path(__file__).resolve().parent          # .../app/ui_fastapi
+PROJECT_ROOT = BASE_DIR.parent.parent               # .../ (raíz del repo)
+SRC_DIR = PROJECT_ROOT / "src"
 
 if str(SRC_DIR) not in sys.path:
     sys.path.append(str(SRC_DIR))
+
 
 # ==========================================================
 # IMPORTS DE TU MOTOR REAL
@@ -22,11 +28,13 @@ if str(SRC_DIR) not in sys.path:
 from core.build_case import build_case_from_dicom
 from qa.engine import evaluate_case
 
+
 # ==========================================================
 # FASTAPI APP
 # ==========================================================
 app = FastAPI(title="RT-AI QA UI")
 
+# static y templates están en: src/app/static y src/app/templates
 app.mount(
     "/static",
     StaticFiles(directory=str(BASE_DIR / "static")),
@@ -41,24 +49,21 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 # ==========================================================
 def _infer_group_from_name(name: str) -> str:
     """
-    Si el CheckResult no trae .group, inferimos un grupo clínico
-    a partir del nombre del check.
+    Fallback por si algún CheckResult aún no trae .group.
+    La idea es que, a largo plazo, casi no se use esto porque
+    el motor ya envía group="CT"/"Structures"/"Plan"/"Dose".
     """
     n = (name or "").lower()
 
-    # CT / imagen
     if "ct " in n or "geometry" in n:
         return "CT"
 
-    # Estructuras
     if "structure" in n or "ptv" in n or "oar" in n or "rectum" in n or "bladder" in n:
         return "Structures"
 
-    # Plan (beams, técnica, fraccionamiento)
     if "beam" in n or "plan " in n or "fraction" in n or "technique" in n:
         return "Plan"
 
-    # Dosis / DVH
     if "dose" in n or "d95" in n or "hotspot" in n or "dvh" in n:
         return "Dose"
 
@@ -67,36 +72,40 @@ def _infer_group_from_name(name: str) -> str:
 
 def _normalize_check(chk) -> dict:
     """
-    Convierte un objeto CheckResult en un dict simple
-    que la plantilla pueda usar.
+    Convierte un CheckResult en un dict simple para la plantilla.
 
-    En esta versión "limpia" asumimos que el motor expone:
-      - name
-      - passed
-      - score
-      - message
-      - group  (opcional, pero preferido)
-      - recommendation (opcional)
+    Usa:
+      - chk.name
+      - chk.group (o lo infiere por nombre)
+      - chk.passed  → status PASS/FAIL
+      - chk.score
+      - chk.message
+      - chk.recommendation
     """
+    # Nombre
+    name = getattr(chk, "name", None)
+    if name is None:
+        name = getattr(chk, "id", "Unnamed check")
 
-    # Nombre del check
-    name = getattr(chk, "name", None) or getattr(chk, "id", "Unnamed check")
-
-    # Grupo clínico: usamos el que venga del motor; si viene vacío o None,
-    # hacemos fallback a la heurística por nombre.
+    # Grupo – primero intentamos usar el que viene del backend
     raw_group = getattr(chk, "group", None)
     group = raw_group if raw_group else _infer_group_from_name(name)
 
-    # Status: derivado *solo* de .passed
-    passed_flag = bool(getattr(chk, "passed", False))
-    status = "PASS" if passed_flag else "FAIL"
+    # Status: solo usamos `passed` del backend
+    passed_attr = getattr(chk, "passed", None)
+    if passed_attr is True:
+        status = "PASS"
+    elif passed_attr is False:
+        status = "FAIL"
+    else:
+        status = "UNKNOWN"
 
-    # Score numérico (0–1 idealmente)
+    # Score (0–1 normalmente)
     score = getattr(chk, "score", None)
 
     # Mensaje y recomendación
-    message = getattr(chk, "message", "") or ""
-    recommendation = getattr(chk, "recommendation", "") or ""
+    message = getattr(chk, "message", "")
+    recommendation = getattr(chk, "recommendation", "")
 
     return {
         "name": name,
@@ -106,7 +115,6 @@ def _normalize_check(chk) -> dict:
         "message": message,
         "recommendation": recommendation,
     }
-
 
 
 # ==========================================================
@@ -138,7 +146,7 @@ async def run_qa(
 ):
     try:
         # -----------------------------
-        # Construcción de paths
+        # Paths del paciente
         # -----------------------------
         patient_dir = Path(data_root) / patient_id
 
@@ -153,7 +161,7 @@ async def run_qa(
             raise FileNotFoundError(f"No se encontró RTSTRUCT en {rtstruct_path}")
 
         # -----------------------------
-        # Llamada real al motor QA
+        # Motor QA
         # -----------------------------
         case = build_case_from_dicom(
             patient_id=patient_id,
@@ -165,23 +173,21 @@ async def run_qa(
 
         qa_result = evaluate_case(case)
 
-        # -----------------------------
-        # Normalizar checks para la UI
-        # -----------------------------
+        # Normalizar todos los checks
         checks = [_normalize_check(chk) for chk in qa_result.checks]
 
         # -----------------------------
-        # Resumen por tipo de resultado
+        # Resumen PASS / WARN / FAIL
         # -----------------------------
-        def _is_pass(s):
+        def _is_pass(s: str) -> bool:
             return str(s).upper() == "PASS"
 
-        def _is_fail(s):
+        def _is_fail(s: str) -> bool:
             return str(s).upper() == "FAIL"
 
-        def _is_warning(s):
-            s_up = str(s).upper()
-            return "WARN" in s_up or "ALERT" in s_up or "CAUTION" in s_up
+        def _is_warning(s: str) -> bool:
+            up = str(s).upper()
+            return "WARN" in up or "ALERT" in up or "CAUTION" in up
 
         num_pass = sum(1 for c in checks if _is_pass(c["status"]))
         num_fail = sum(1 for c in checks if _is_fail(c["status"]))
@@ -195,7 +201,7 @@ async def run_qa(
         }
 
         # -----------------------------
-        # Status global
+        # Estado global
         # -----------------------------
         global_status = getattr(qa_result, "status", None)
         if global_status is None and hasattr(qa_result, "overall_status"):
@@ -212,28 +218,28 @@ async def run_qa(
                 global_status = "UNKNOWN"
 
         # -----------------------------
-        # Agrupar por grupo (CT / Structures / Plan / Dose...)
+        # Agrupar por grupo clínico
         # -----------------------------
-        grouped: dict[str, list[dict]] = defaultdict(list)
+        grouped = defaultdict(list)
         for c in checks:
-            gname = c["group"] or "General"
+            gname = c.get("group") or "General"
             grouped[gname].append(c)
 
-        # para debug, ver en terminal qué grupos hay
         print("[QA-UI] Grupos detectados:", list(grouped.keys()))
 
-        group_list = [
-            {"name": gname, "checks": clist}
-            for gname, clist in grouped.items()
-        ]
+        # Lo que espera el HTML nuevo:
+        # - grouped_checks: dict {grupo: [checks...]}
+        # - groups: lista de nombres de grupo
+        grouped_checks = dict(grouped)
+        group_names = list(grouped_checks.keys())
 
         result = {
             "patient_id": patient_id,
             "total_score": getattr(qa_result, "total_score", None),
             "status": global_status,
-            "checks": checks,
             "summary": summary,
-            "groups": group_list,
+            "grouped_checks": grouped_checks,
+            "groups": group_names,
         }
         error = None
 
@@ -241,14 +247,64 @@ async def run_qa(
         result = None
         error = str(e)
 
+    # -----------------------------
+    # Devolver plantilla
+    # -----------------------------
     return templates.TemplateResponse(
         "index.html",
         {
             "request": request,
-            "message": "UI conectada al motor QA 🚀",
             "result": result,
             "error": error,
             "data_root": data_root,
             "patient_id": patient_id,
         },
     )
+
+@app.get("/export/csv")
+async def export_csv(data_root: str, patient_id: str):
+    """
+    Genera un CSV con todos los checks del QA.
+    Se vuelve a evaluar el caso con los mismos parámetros.
+    """
+    # Construir paths igual que en /run
+    patient_dir   = Path(data_root) / patient_id
+    ct_path       = patient_dir / "CT"
+    rtstruct_path = patient_dir / "RTSTRUCT.dcm"
+    rtdose_path   = patient_dir / "RTDOSE.dcm"
+    rtplan_path   = patient_dir / "RTPLAN.dcm"
+
+    case = build_case_from_dicom(
+        patient_id=patient_id,
+        ct_folder=str(ct_path),
+        rtstruct_path=str(rtstruct_path),
+        rtplan_path=str(rtplan_path) if rtplan_path.exists() else None,
+        rtdose_path=str(rtdose_path) if rtdose_path.exists() else None,
+    )
+
+    qa_result = evaluate_case(case)
+
+    # Normalizar checks igual que en la UI
+    checks = [_normalize_check_for_ui(chk) for chk in qa_result.checks]
+
+    buffer = io.StringIO()
+    writer = csv.writer(buffer)
+    writer.writerow(["group", "name", "status", "score", "message", "recommendation"])
+    for c in checks:
+        writer.writerow([
+            c.get("group", ""),
+            c.get("name", ""),
+            c.get("status", ""),
+            c.get("score", ""),
+            c.get("message", "").replace("\n", " "),
+            (c.get("recommendation") or "").replace("\n", " "),
+        ])
+
+    buffer.seek(0)
+    filename = f"qa_{patient_id}.csv"
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"'
+    }
+    return StreamingResponse(iter([buffer.getvalue()]),
+                             media_type="text/csv",
+                             headers=headers)

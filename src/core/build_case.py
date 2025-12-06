@@ -7,7 +7,7 @@ import os
 
 from core.case import Case, StructureInfo, PlanInfo, BeamInfo
 from core.geometry import compute_centroid, compute_volume_cc
-from dicom_io import (
+from core.dicom_io import (
     load_ct_series,
     load_rtstruct,
     load_rtplan,

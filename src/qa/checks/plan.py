@@ -1,366 +1,25 @@
-"""
-checks_plan.py
-==============
-
-Módulo de QA de PLAN (RTPLAN) para el motor de Auto-QA Inteligente.
-
-Este archivo se encarga de todos los checks que dependen del plan de tratamiento:
-geometría de beams/arcos, técnica declarada, energía, número de arcos, posición
-del isocentro, y recomendaciones de configuración de campos.
-
-Actualmente está pensado para:
-  - Casos de próstata (sitio inferido desde estructuras).
-  - Técnicas principalmente STATIC y VMAT en entorno Eclipse/Halcyon.
-  - PlanInfo y BeamInfo tal como están definidos en common/case.py.
-
-La idea es que este módulo sea:
-  - 💡 Fácil de leer: cada check es una función pequeña y bien documentada.
-  - 🔧 Fácil de extender: hay “hooks” claros para añadir nuevos sitios, técnicas
-    y reglas.
-  - 🧱 Independiente: solo depende de Case, PlanInfo, BeamInfo y del módulo
-    de naming/utils_structures para inferir el sitio.
-
-----------------------------------------------------------------------
-1. Qué hace exactamente hoy
-----------------------------------------------------------------------
-
-Este módulo implementa 4 checks principales:
-
-1) check_isocenter_vs_ptv
-   - Calcula la distancia entre el isocentro del plan (case.plan.isocenter_mm)
-     y el centroide del PTV principal.
-   - Usa la geometría del CT almacenada en case.metadata:
-       - 'ct_origin'        → origen (x,y,z) del volumen en mm.
-       - 'ct_spacing_sitk'  → spacing (sx,sy,sz) en mm estilo SimpleITK.
-   - Si la distancia es mayor que un umbral (por defecto 15 mm), marca una
-     advertencia porque podría indicar:
-       * isocentro mal colocado,
-       * RTPLAN desalineado con el CT,
-       * o problemas de asociación DICOM.
-
-2) check_plan_technique
-   - Verifica la consistencia global del plan:
-       * Energía esperada (substring, por ejemplo "6" en "6X" o "6X-FFF").
-       * Técnica declarada (STATIC, VMAT, IMRT, 3D-CRT…) frente a un conjunto
-         permitido por sitio.
-       * Número mínimo de beams/arcos (case.plan.num_arcs).
-   - El sitio clínico (por ahora) se infiere con _infer_site_from_structures()
-     usando utils_naming.normalize_structure_name():
-       * Si el sitio es PROSTATE:
-           allowed_techniques = ["STATIC", "VMAT"]
-           min_beams_or_arcs = 1   (se puede subir fácilmente a 2 o más)
-       * Si el sitio es desconocido:
-           allowed_techniques = ["STATIC", "VMAT", "IMRT", "3D-CRT"]
-   - Devuelve un CheckResult con:
-       * passed = True/False
-       * score  → 1.0 si todo ok, menos si hay issues.
-       * message → texto legible y rápido de interpretar.
-       * details → diccionario con energía, técnica, sitio inferido, etc.
-
-3) check_beam_geometry
-   - Revisa beam por beam la geometría básica:
-       * couch_angle
-       * collimator_angle
-       * cobertura de gantry (si es arco, usando gantry_start/gantry_end).
-   - Usa case.plan.beams: List[BeamInfo], donde BeamInfo incluye:
-       beam_number, beam_name, modality, beam_type, is_arc,
-       gantry_start, gantry_end, couch_angle, collimator_angle.
-   - Checks actuales:
-       * Para sitio PROSTATE → couch cercano a 0° (desviación máx pequeña).
-       * Todos los colimadores casi iguales → sugiere variar colimadores
-         (p.ej. dos familias de ángulos).
-       * En VMAT → comprueba que haya al menos un arco con cobertura “amplia”
-         de gantry (umbral configurable, por defecto > 200°).
-   - Si no hay información beam-level (case.plan.beams vacío), el check pasa
-     en modo “informativo” sin penalizar.
-
-4) check_beam_recommendations
-   - Genera recomendaciones textuales de configuración según sitio/técnica.
-   - Actualmente implementa reglas específicas para:
-       * PROSTATE + VMAT:
-           - Recomendar ≥ 2 arcos coplanares.
-           - Couch ~ 0°.
-           - Colimadores en dos familias de ángulos (p.ej. ~20° y ~340°).
-   - Si el sitio no es PROSTATE o la técnica no es VMAT, el check simplemente
-     indica que no tiene recomendaciones específicas (hook para futuro).
-   - Este check nunca “falla” el plan; solo ajusta el score como advertencia
-     suave si ve cosas claramente mejorables.
-
-Además, el módulo incluye:
-
-- debug_print_plan_beams(case):
-    Función para imprimir por consola cómo se están leyendo los beams desde
-    RTPLAN. Muy útil para:
-      * Validar que BeamInfo está llenándose correctamente.
-      * Ajustar umbrales de colimador/gantry a lo que realmente haces en clínica.
-
-
-----------------------------------------------------------------------
-2. Dependencias y supuestos
-----------------------------------------------------------------------
-
-Este módulo asume:
-
-- Case (common/case.py):
-    case.plan: Optional[PlanInfo]
-    case.structs: Dict[str, StructureInfo]
-    case.ct_hu, case.ct_spacing
-    case.metadata['ct_origin'], case.metadata['ct_spacing_sitk']
-
-- PlanInfo (common/case.py):
-    energy: str
-    technique: str
-    num_arcs: int
-    isocenter_mm: Tuple[float, float, float]
-    beams: List[BeamInfo]
-
-- BeamInfo (common/case.py):
-    beam_number: int
-    beam_name: str
-    modality: Optional[str]
-    beam_type: Optional[str]
-    is_arc: bool
-    gantry_start: Optional[float]
-    gantry_end: Optional[float]
-    couch_angle: Optional[float]
-    collimator_angle: Optional[float]
-
-- utils_naming.normalize_structure_name():
-    Devuelve un objeto con atributos como:
-      - canonical  → nombre canónico de la estructura (RECTUM, BLADDER, PROSTATE…)
-      - site_hint  → pista de sitio (PROSTATE, BREAST, etc.)
-    Esto se usa en _infer_site_from_structures().
-
-
-----------------------------------------------------------------------
-3. Cómo ajustar umbrales y reglas actuales
-----------------------------------------------------------------------
-
-Si quieres ajustar comportamientos sin tocar la arquitectura:
-
-- Distancia isocentro–PTV:
-    En check_isocenter_vs_ptv() → parámetro max_distance_mm (por defecto 15 mm).
-
-- Energía esperada:
-    En check_plan_technique() → default_energy_substring = "6".
-    Lo puedes cambiar por "10", "6X-FFF", etc., o pasar otra cosa cuando llames
-    al check (si en el futuro lo parametrizas desde fuera).
-
-- Técnicas permitidas por sitio:
-    En check_plan_technique():
-      if site == "PROSTATE":
-          allowed_techniques = ["STATIC", "VMAT"]
-    Puedes añadir "IMRT", "SIB", etc. según tu flujo.
-
-- Cobertura “amplia” de gantry (VMAT):
-    En check_beam_geometry() → wide_arc_threshold (por defecto 200°).
-    Para exigir arcos casi completos, puedes subirlo a ≈ 280°.
-
-- Sensibilidad a colimadores iguales:
-    En check_beam_geometry() se mira si col_max - col_min < 5°.
-    Puedes bajar/subir ese umbral si tus colimadores suelen “oscilar” poco.
-
-
-----------------------------------------------------------------------
-4. Cómo añadir un nuevo sitio (p.ej. MAMA, LUNG, HEADNECK)
-----------------------------------------------------------------------
-
-1) Extender utils_naming.normalize_structure_name
-   - Añadir patrones de estructuras típicas:
-       - MAMA → BREAST_L, BREAST_R, HEART, LUNG_IPSI, etc.
-       - LUNG → PTV_LUNG, esófago, médula, etc.
-   - Hacer que devuelva site_hint="BREAST" o "LUNG" en esos casos.
-
-2) Extender _infer_site_from_structures()
-   - En la práctica, probablemente no toque mucho código aquí: la función
-     ya se basa en site_hint. Solo necesitas que normalize_structure_name()
-     sepa reconocer más sitios.
-
-3) Adaptar reglas de técnica en check_plan_technique()
-   - Añadir bloques tipo:
-
-        if site == "BREAST":
-            allowed_techniques = ["3D-CRT", "VMAT", ...]
-            min_beams_or_arcs = 2
-            expected_energy_substring = "6"
-
-        elif site == "LUNG":
-            ...
-
-4) Añadir recomendaciones específicas en check_beam_recommendations()
-   - Añadir otro bloque:
-
-        if site == "BREAST" and technique == "3D-CRT":
-            # sugerencias sobre campos tangenciales, colimador, couch, etc.
-
-        if site == "LUNG" and technique == "VMAT":
-            # sugerencias de número de arcos, etc.
-
-
-----------------------------------------------------------------------
-5. Cómo añadir un nuevo check de plan
-----------------------------------------------------------------------
-
-La filosofía es que cada check sea una función:
-
-    def check_algo_del_plan(case: Case) -> CheckResult:
-        ...
-
-Pasos:
-
-1) Crear la función nueva en este archivo.
-   - Ejemplo: revisar que el número de fracciones y la dosis por fracción
-     sean típicas para el sitio → check_fractionation_vs_site().
-
-2) Llamarla desde run_plan_checks():
-   - Añadir:
-
-        results.append(check_fractionation_vs_site(case))
-
-3) Mantener el patrón:
-   - No hacer prints desde el check (salvo debug puntual).
-   - Devolver siempre un CheckResult con:
-       name, passed, score, message, details.
-
-
-----------------------------------------------------------------------
-6. Cómo usar debug_print_plan_beams para tunear el sistema
-----------------------------------------------------------------------
-
-En tu notebook, una vez que tienes el Case:
-
-    from qa.checks_plan import debug_print_plan_beams
-
-    debug_print_plan_beams(case)
-
-Verás algo similar a:
-
-    [DEBUG] Plan energy=6, technique=VMAT, num_arcs=2
-    [DEBUG] Número de beams en lista: 2
-
-      Beam 1 | name=Arc1 | modality=PHOTON | type=DYNAMIC | is_arc=True |
-              gantry=181.0->179.0 | couch=0.0 | collimator=20.0
-      Beam 2 | name=Arc2 | modality=PHOTON | type=DYNAMIC | is_arc=True |
-              gantry=179.0->181.0 | couch=0.0 | collimator=340.0
-
-Con esta información puedes:
-  - Ver si tu lógica de is_arc, gantry_start/gantry_end, collimador, couch
-    refleja bien tu práctica clínica.
-  - Ajustar umbrales y recomendaciones de forma consistente con tus planes reales.
-
-
-----------------------------------------------------------------------
-7. Filosofía general del módulo
-----------------------------------------------------------------------
-
-- Este módulo está pensado como un “lente” sobre el RTPLAN:
-    No es un optimizador, no recalcula dosis, no reemplaza el juicio clínico.
-    Pero sí te da un diagnóstico rápido de “esto huele bien / normal / raro”.
-
-- Todo está organizado para que:
-    - Puedas empezar solo con próstata + VMAT/STATIC.
-    - Vayas añadiendo sitios, técnicas y reglas poco a poco.
-    - La IA sea un módulo que se enchufa después, pero la base de QA y
-      geometría ya exista y sea robusta.
-
-- Si en el futuro integras este módulo en un producto comercial o startup:
-    - check_beam_geometry y check_beam_recommendations son puntos clave donde
-      puedes incorporar:
-        * reglas aprendidas de datos,
-        * plantillas inteligentes por máquina/sitio,
-        * recomendaciones basadas en literatura (papers sobre prácticas óptimas).
-"""
-
-
 from __future__ import annotations
 
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Any
 import numpy as np
 
 from core.case import Case, CheckResult, StructureInfo, BeamInfo
-from .checks_structures import _find_ptv_struct
-from .utils_naming import normalize_structure_name
-
-
-# =====================================================
-# Tabla interna de fraccionamientos comunes por sitio
-# =====================================================
-
-COMMON_SCHEMES = {
-    "PROSTATE": [
-        {
-            "total": 78.0,
-            "fx": 39,
-            "tech": "VMAT",
-            "label": "Convencional 78/39",
-            "ref": "RTOG 0126 / guías NCCN",
-        },
-        {
-            "total": 60.0,
-            "fx": 20,
-            "tech": "VMAT",
-            "label": "Moderadamente hipofraccionado 60/20",
-            "ref": "HYPO-RT trial / guías EAU",
-        },
-        {
-            "total": 36.25,
-            "fx": 5,
-            "tech": "SBRT",
-            "label": "SBRT 36.25/5",
-            "ref": "HYPO-RT-SBRT / Kupelian et al.",
-        },
-    ],
-    # Aquí luego puedes añadir MAMA, LUNG, etc.
-}
-
+from .structures import _find_ptv_struct
+from core.naming import normalize_structure_name, infer_site_from_structs
+from qa.config import (
+    get_plan_tech_config_for_site,
+    get_beam_geom_config_for_site,
+    get_iso_ptv_config_for_site,
+    get_site_profile,
+    get_fractionation_scoring_for_site,
+    get_plan_recommendations,
+    format_recommendations_text,
+)
 
 
 # =====================================================
 # Helpers internos
 # =====================================================
-
-def _get_fractionation_from_plan(case: Case):
-    """
-    Helper para extraer fraccionamiento del plan desde case.plan.
-
-    Devuelve:
-        total_dose_gy, num_fractions, dose_per_fraction_gy
-    """
-    if case.plan is None:
-        return None, None, None
-
-    return (
-        case.plan.total_dose_gy,
-        case.plan.num_fractions,
-        case.plan.dose_per_fraction_gy,
-    )
-
-
-def _infer_site_from_structures(case: Case) -> Optional[str]:
-    """
-    Intenta inferir el 'sitio' clínico principal (PROSTATE, BREAST, etc.)
-    a partir de los nombres de las estructuras usando utils_naming.
-
-    Ahora mismo:
-      - Si ve PROSTATE / estructuras típicas de pelvis → 'PROSTATE'.
-      - En cualquier otro caso → None (UNKNOWN por ahora).
-
-    Hook para futuro:
-      - Añadir lógica para BREAST, LUNG, HEADNECK, etc.
-    """
-    site_counts: Dict[str, int] = {}
-
-    for name in case.structs.keys():
-        norm = normalize_structure_name(name)
-        if norm.site_hint:
-            site_counts[norm.site_hint] = site_counts.get(norm.site_hint, 0) + 1
-
-    if not site_counts:
-        return None
-
-    site = max(site_counts.items(), key=lambda kv: kv[1])[0]
-    return site
-
 
 def _get_plan_beams(case: Case) -> Optional[List[BeamInfo]]:
     """
@@ -378,14 +37,7 @@ def _get_plan_beams(case: Case) -> Optional[List[BeamInfo]]:
 def debug_print_plan_beams(case: Case) -> None:
     """
     Imprime por consola un resumen de la geometría de cada beam/arco del plan.
-
-    ÚSALO EN EL NOTEBOOK, por ejemplo:
-
-        from qa.checks_plan import debug_print_plan_beams
-        debug_print_plan_beams(case)
-
-    Así puedes ver exactamente qué está leyendo de tu RTPLAN y ajustar
-    umbrales y heurísticas de los checks.
+    ÚTIL en notebooks para entender qué está leyendo el QA del RTPLAN.
     """
     if case.plan is None:
         print("[DEBUG] No hay plan en este Case.")
@@ -396,7 +48,10 @@ def debug_print_plan_beams(case: Case) -> None:
         print("[DEBUG] case.plan.beams está vacío o no definido.")
         return
 
-    print(f"[DEBUG] Plan energy={case.plan.energy}, technique={case.plan.technique}, num_arcs={case.plan.num_arcs}")
+    print(
+        f"[DEBUG] Plan energy={case.plan.energy}, "
+        f"technique={case.plan.technique}, num_arcs={case.plan.num_arcs}"
+    )
     print(f"[DEBUG] Número de beams en lista: {len(beams)}\n")
 
     for b in beams:
@@ -413,12 +68,20 @@ def debug_print_plan_beams(case: Case) -> None:
 # 1) Isocentro vs PTV
 # =====================================================
 
-def check_isocenter_vs_ptv(case: Case,
-                           max_distance_mm: float = 15.0) -> CheckResult:
+def check_isocenter_vs_ptv(
+    case: Case,
+    max_distance_mm: Optional[float] = None,
+) -> CheckResult:
     """
     Distancia isocentro–centroide del PTV (mm).
+
+    El umbral y los scores vienen de config.ISO_PTV_CONFIG vía
+    get_iso_ptv_config_for_site(site).
     """
     if case.plan is None:
+        rec_texts = get_plan_recommendations("ISO_PTV", "NO_PLAN")
+        rec = format_recommendations_text(rec_texts)
+
         return CheckResult(
             name="Isocenter vs PTV",
             passed=False,
@@ -426,14 +89,14 @@ def check_isocenter_vs_ptv(case: Case,
             message="No hay plan cargado, no se puede evaluar isocentro.",
             details={},
             group="Plan",
-            recommendation=(
-                "Verificar que el RTPLAN correspondiente haya sido exportado y que el archivo RTPLAN.dcm "
-                "esté presente en la carpeta del paciente."
-            ),
+            recommendation=rec,
         )
 
     ptv: StructureInfo | None = _find_ptv_struct(case)
     if ptv is None:
+        rec_texts = get_plan_recommendations("ISO_PTV", "NO_PTV")
+        rec = format_recommendations_text(rec_texts)
+
         return CheckResult(
             name="Isocenter vs PTV",
             passed=False,
@@ -441,11 +104,17 @@ def check_isocenter_vs_ptv(case: Case,
             message="No se encontró PTV para evaluar la distancia al isocentro.",
             details={},
             group="Plan",
-            recommendation=(
-                "Revisar el RTSTRUCT y comprobar que exista al menos un PTV clínico. Si el nombre del PTV es "
-                "no estándar, añadir el patrón correspondiente al módulo de naming robusto."
-            ),
+            recommendation=rec,
         )
+
+    # Config por sitio
+    site = infer_site_from_structs(case.structs.keys())
+    iso_conf = get_iso_ptv_config_for_site(site)
+
+    if max_distance_mm is None:
+        max_distance_mm = float(iso_conf.get("max_distance_mm", 15.0))
+    score_ok = float(iso_conf.get("score_ok", 1.0))
+    score_fail = float(iso_conf.get("score_fail", 0.3))
 
     origin = case.metadata.get("ct_origin", (0.0, 0.0, 0.0))          # (x,y,z)
     spacing_sitk = case.metadata.get("ct_spacing_sitk", None)         # (sx,sy,sz)
@@ -458,6 +127,9 @@ def check_isocenter_vs_ptv(case: Case,
 
     idx = np.argwhere(ptv.mask)
     if idx.size == 0:
+        rec_texts = get_plan_recommendations("ISO_PTV", "EMPTY_PTV")
+        rec = format_recommendations_text(rec_texts)
+
         return CheckResult(
             name="Isocenter vs PTV",
             passed=False,
@@ -465,10 +137,7 @@ def check_isocenter_vs_ptv(case: Case,
             message=f"PTV '{ptv.name}' sin voxeles, no se puede evaluar.",
             details={},
             group="Plan",
-            recommendation=(
-                "Revisar el contorno del PTV en el TPS. Es posible que el ROI esté vacío o mal asociado "
-                "al CT exportado."
-            ),
+            recommendation=rec,
         )
 
     mean_z, mean_y, mean_x = idx.mean(axis=0)  # [z,y,x]
@@ -484,21 +153,20 @@ def check_isocenter_vs_ptv(case: Case,
 
     if dist <= max_distance_mm:
         passed = True
-        score = 1.0
+        score = score_ok
         msg = f"Isocentro razonablemente centrado en PTV (distancia {dist:.1f} mm)."
-        rec = ""
+        scenario = "OK"
     else:
         passed = False
-        score = 0.3
+        score = score_fail
         msg = (
             f"Isocentro alejado del PTV ({dist:.1f} mm > {max_distance_mm} mm). "
             "Revisar isocentro del plan o la asociación CT–RTPLAN."
         )
-        rec = (
-            "Verificar en el TPS que el isocentro esté colocado en el PTV correcto y que el RTPLAN exportado "
-            "corresponda al mismo CT y RTSTRUCT usados en este QA. Si es necesario, corregir el isocentro y "
-            "recalcular la dosis."
-        )
+        scenario = "FAR_ISO"
+
+    rec_texts = get_plan_recommendations("ISO_PTV", scenario)
+    rec = format_recommendations_text(rec_texts)
 
     return CheckResult(
         name="Isocenter vs PTV",
@@ -510,25 +178,33 @@ def check_isocenter_vs_ptv(case: Case,
             "ptv_name": ptv.name,
             "ptv_centroid_patient_mm": centroid_patient.tolist(),
             "iso_mm": case.plan.isocenter_mm,
+            "site_inferred": site,
+            "config_used": iso_conf,
         },
         group="Plan",
         recommendation=rec,
     )
 
+
 # =====================================================
 # 2) Consistencia básica de técnica del plan
 # =====================================================
 
-def check_plan_technique(case: Case,
-                         default_energy_substring: str = "6") -> CheckResult:
+def check_plan_technique(case: Case) -> CheckResult:
     """
-    Técnica global:
+    Verifica que la técnica global del plan sea coherente con el sitio:
 
-      - Energía (substring en case.plan.energy).
-      - Técnica en conjunto permitido por sitio.
-      - Nº mínimo de beams/arcos.
+      - La técnica (STATIC / VMAT / IMRT / 3D, etc.) esté en la lista permitida.
+      - La energía contenga el substring esperado (p.ej. "6" para 6 MV).
+      - Nº de beams clínicos y nº de arcos dentro de rangos razonables.
+
+    La configuración viene de qa.config.PLAN_TECH_CONFIG
+    vía get_plan_tech_config_for_site(site) o SITE_PROFILES.
     """
     if case.plan is None:
+        rec_texts = get_plan_recommendations("PLAN_TECH", "NO_PLAN")
+        rec = format_recommendations_text(rec_texts)
+
         return CheckResult(
             name="Plan technique consistency",
             passed=False,
@@ -536,70 +212,95 @@ def check_plan_technique(case: Case,
             message="No hay plan cargado.",
             details={},
             group="Plan",
-            recommendation=(
-                "Verificar que el RTPLAN se haya exportado correctamente junto con el CT y el RTSTRUCT. "
-                "Sin plan no se puede evaluar técnica, fraccionamiento ni geometría de beams."
-            ),
+            recommendation=rec,
         )
 
-    site = _infer_site_from_structures(case)
+    struct_names = list(case.structs.keys())
+    site = infer_site_from_structs(struct_names)
+    profile = get_site_profile(site)
+    rules: Dict[str, Any] = profile.get("plan_tech", {}) or get_plan_tech_config_for_site(site)
 
-    if site == "PROSTATE":
-        allowed_techniques = ["STATIC", "VMAT"]
-        min_beams_or_arcs = 1
-        expected_energy_substring = default_energy_substring
-    else:
-        allowed_techniques = ["STATIC", "VMAT", "IMRT", "3D-CRT"]
-        min_beams_or_arcs = 1
-        expected_energy_substring = default_energy_substring
+    allowed_techniques = [t.upper() for t in rules.get("allowed_techniques", ["STATIC", "VMAT", "IMRT", "3D-CRT"])]
+    energy_substring = str(rules.get("energy_substring", "")).upper()
+    min_beams = int(rules.get("min_beams", 0))
+    max_beams = int(rules.get("max_beams", 999))
+    min_arcs = int(rules.get("min_arcs", 0))
+    max_arcs = int(rules.get("max_arcs", 999))
+    ignore_pats = [p.upper() for p in rules.get("ignore_beam_name_patterns", ["CBCT", "KV", "IMAGING"])]
 
-    issues = []
+    score_ok = float(rules.get("score_ok", 1.0))
+    score_warn = float(rules.get("score_warn", 0.6))
+    score_fail = float(rules.get("score_fail", 0.3))
+
+    # ---------------------------------------------------------
+    # Contar beams clínicos y arcos (ignorando CBCT/KV/IMAGING)
+    # ---------------------------------------------------------
+    clinical_beams: List[BeamInfo] = []
+    for b in case.plan.beams:
+        name_up = (b.beam_name or "").upper()
+        if any(pat in name_up for pat in ignore_pats):
+            continue
+        clinical_beams.append(b)
+
+    num_beams = len(clinical_beams)
+    num_arcs = sum(1 for b in clinical_beams if b.is_arc)
+
+    plan_technique = (case.plan.technique or "").upper()
+    plan_energy = str(case.plan.energy or "").upper()
+
+    # ---------------------------------------------------------
+    # Evaluar contra reglas
+    # ---------------------------------------------------------
+    issues: list[str] = []
+
+    # Técnica permitida
+    if plan_technique and plan_technique not in allowed_techniques:
+        issues.append(
+            f"Técnica '{plan_technique}' fuera del conjunto permitido "
+            f"{allowed_techniques} para sitio {site or 'DESCONOCIDO'}."
+        )
 
     # Energía
-    if expected_energy_substring not in case.plan.energy:
+    if energy_substring and energy_substring not in plan_energy:
         issues.append(
-            f"Energía esperada que contenga '{expected_energy_substring}', "
-            f"encontrada '{case.plan.energy}'."
+            f"Energía esperada que contenga '{energy_substring}', "
+            f"encontrada '{plan_energy}'."
         )
 
-    # Técnica
-    if case.plan.technique not in allowed_techniques:
+    # Nº beams
+    if num_beams < min_beams or num_beams > max_beams:
         issues.append(
-            f"Técnica '{case.plan.technique}' fuera del conjunto permitido {allowed_techniques} "
-            f"para sitio {site or 'DESCONOCIDO'}."
+            f"Número de beams clínicos = {num_beams} fuera del rango "
+            f"[{min_beams}, {max_beams}]."
         )
 
-    # Nº beams/arcos (usamos num_arcs como resumen)
-    if case.plan.num_arcs < min_beams_or_arcs:
+    # Nº arcos
+    if num_arcs < min_arcs or num_arcs > max_arcs:
         issues.append(
-            f"Número de beams/arcos = {case.plan.num_arcs} < mínimo esperado {min_beams_or_arcs}."
+            f"Número de arcos clínicos = {num_arcs} fuera del rango "
+            f"[{min_arcs}, {max_arcs}]."
         )
 
+    # ---------------------------------------------------------
+    # Score y resultado
+    # ---------------------------------------------------------
     passed = len(issues) == 0
-    score = 1.0 if passed else 0.4
-    msg = "Plan consistente con configuración esperada." if passed else " ; ".join(issues)
 
     if passed:
-        rec = ""
+        score = score_ok
+        scenario = "OK"
+        msg = "Plan consistente con configuración esperada para el sitio."
     else:
-        rec_parts = []
-        if expected_energy_substring not in case.plan.energy:
-            rec_parts.append(
-                f"Asegurarse de que la energía del haz sea la esperada para {site or 'el sitio tratado'} "
-                f"(p.ej. {expected_energy_substring} MV) según los protocolos del servicio."
-            )
-        if case.plan.technique not in allowed_techniques:
-            rec_parts.append(
-                f"Revisar si la técnica '{case.plan.technique}' es apropiada para {site or 'el sitio tratado'} "
-                f"y considerar usar una de {allowed_techniques} si se ajusta mejor a las guías clínicas."
-            )
-        if case.plan.num_arcs < min_beams_or_arcs:
-            rec_parts.append(
-                "Comprobar que el número de campos/arcos sea suficiente para lograr la conformación de dosis "
-                "deseada; en algunos casos puede requerirse aumentar el número de beams/arcos."
-            )
+        if len(issues) == 1:
+            score = score_warn
+        else:
+            score = score_fail
 
-        rec = " ".join(rec_parts)
+        scenario = "ISSUES"
+        msg = " ; ".join(issues)
+
+    rec_texts = get_plan_recommendations("PLAN_TECH", scenario)
+    rec = format_recommendations_text(rec_texts)
 
     return CheckResult(
         name="Plan technique consistency",
@@ -607,317 +308,342 @@ def check_plan_technique(case: Case,
         score=score,
         message=msg,
         details={
-            "energy": case.plan.energy,
-            "technique": case.plan.technique,
-            "num_arcs": case.plan.num_arcs,
             "site_inferred": site,
+            "plan_technique": plan_technique,
+            "plan_energy": plan_energy,
+            "num_beams_clinical": num_beams,
+            "num_arcs_clinical": num_arcs,
             "allowed_techniques": allowed_techniques,
+            "rules": rules,
         },
         group="Plan",
         recommendation=rec,
     )
 
+
 # =====================================================
-# 3) Geometría de beams/arcos (gantry, couch, colimador) y recommendations
+# 3) Geometría de beams/arcos (gantry, couch, colimador)
 # =====================================================
-
-from collections import Counter
-from typing import List
-
-from core.case import Case, CheckResult, BeamInfo
-from .utils_naming import infer_site_from_structs  # o lo que uses para inferir PROSTATE, BREAST, etc.
-
 
 def check_beam_geometry(case: Case) -> CheckResult:
     """
-    Evalúa la geometría básica de beams/arcos del plan y devuelve un único CheckResult con:
-
-      - message: descripción de lo encontrado (nº de beams, arcos, rangos de gantry, colimadores, couch).
-      - recommendation: sugerencias de mejora cuando algo se ve raro.
-
-    Pensado inicialmente para próstata Halcyon/Eclipse, pero con hooks para otros sitios/técnicas:
-      - analiza num_beams, num_arcs
-      - detecta beams que son arcos (is_arc=True)
-      - revisa couch_angle, collimator_angle
-      - estima 'coverage' para arcos (diferencia de gantry start/end)
+    Evalúa geometría de los beams/arcos utilizando las reglas definidas
+    en BEAM_GEOMETRY_CONFIG (qa.config) vía get_beam_geom_config_for_site.
     """
     if case.plan is None:
+        rec_texts = get_plan_recommendations("BEAM_GEOM", "NO_PLAN")
+        rec = format_recommendations_text(rec_texts)
+
         return CheckResult(
             name="Beam geometry",
             passed=False,
             score=0.2,
-            message="No hay RTPLAN cargado, no se puede evaluar geometría de beams/arcos.",
-            details={},
+            message="No hay RTPLAN para evaluar geometría.",
             group="Plan",
-            recommendation="Verificar que se haya exportado el RTPLAN correspondiente al CT/RTSTRUCT revisados.",
+            details={},
+            recommendation=rec,
         )
 
-    plan = case.plan
-    beams: List[BeamInfo] = plan.beams or []
-    num_beams = len(beams)
-    num_arcs = sum(1 for b in beams if b.is_arc)
+    beams = case.plan.beams or []
 
-    site = infer_site_from_structs(case.structs)  # p.ej. "PROSTATE", "BREAST", etc.
-    tech = (plan.technique or "UNKNOWN").upper()
+    site = infer_site_from_structs(case.structs.keys())
+    cfg = get_beam_geom_config_for_site(site)
 
-    issues: List[str] = []
-    recs: List[str] = []
-    arc_coverages = []
+    ignore_pats = [p.upper() for p in cfg.get("ignore_beam_name_patterns", ["CBCT", "KV", "IMAGING"])]
 
-    # --- Heurísticas suaves por sitio/técnica (puntapié inicial) ---
-
-    # 1) Número de arcos/beams
-    if site == "PROSTATE" and tech in {"VMAT", "STATIC"}:
-        # Asumimos VMAT Halcyon/Eclipse típico ~ 2 arcos coplanares
-        if num_arcs == 0:
-            issues.append("Plan sin arcos detectados (num_arcs=0).")
-            recs.append(
-                "Para próstata VMAT suele utilizarse al menos 2 arcos coplanares. "
-                "Revisar la técnica del plan (quizá es IMRT estático) o considerar VMAT si procede."
-            )
-        elif num_arcs == 1:
-            issues.append("Plan con un solo arco para próstata.")
-            recs.append(
-                "Un solo arco puede ser aceptable en algunos esquemas, pero típicamente se emplean ≥2 arcos "
-                "para mejorar conformidad y protección de OARs. Revisar si un segundo arco podría ser beneficioso."
-            )
-        elif num_arcs > 4:
-            issues.append(f"Plan con número inusualmente alto de arcos (num_arcs={num_arcs}).")
-            recs.append(
-                "Un número muy alto de arcos puede complicar QA y tiempos de tratamiento. "
-                "Revisar si se justifica clínicamente o si se puede simplificar la geometría."
-            )
-
-    # 2) Couch angle (esperado ~0° para pelvis)
-    couch_angles = [b.couch_angle for b in beams if b.couch_angle is not None]
-    if couch_angles:
-        # Checamos si la mayoría están cerca de 0°
-        near_zero = [a for a in couch_angles if abs(a) <= 1.0]
-        if site == "PROSTATE":
-            if len(near_zero) < len(couch_angles):
-                issues.append(
-                    f"Couch con ángulos distintos de 0° en algunos beams ({couch_angles})."
-                )
-                recs.append(
-                    "Para pelvis/prostata suelen usarse arcos coplanares (couch≈0°). "
-                    "Revisar si los ángulos de couch inclinados son intencionales."
-                )
-
-    # 3) Colimadores (preferencia por pares complementarios)
-    coll_angles = [b.collimator_angle for b in beams if b.collimator_angle is not None]
-    if coll_angles and site == "PROSTATE":
-        # Contamos cuántos están cerca de familias típicas (~10–40 y ~320–350)
-        family1 = [a for a in coll_angles if 10.0 <= a <= 40.0]
-        family2 = [a for a in coll_angles if 320.0 <= a <= 350.0]
-
-        if len(coll_angles) >= 2 and (len(family1) == 0 or len(family2) == 0):
-            issues.append(
-                f"Colimadores no distribuidos en dos familias complementarias típicas (valores={coll_angles})."
-            )
-            recs.append(
-                "Considerar usar colimadores en dos familias (~10–30° y ~330–350°) para repartir modulación y "
-                "reducir efectos geométricos no deseados de los MLC."
-            )
-
-    # 4) Cobertura de gantry para arcos
-    for idx, b in enumerate(beams):
-        if not b.is_arc or b.gantry_start is None or b.gantry_end is None:
+    # Filtrar beams clínicos
+    clinical_beams: List[BeamInfo] = []
+    for b in beams:
+        name_up = (b.beam_name or "").upper()
+        if any(pat in name_up for pat in ignore_pats):
             continue
-        start = b.gantry_start
-        end = b.gantry_end
+        clinical_beams.append(b)
 
-        # Cobertura en grados (arco horario o antihorario)
-        diff = abs(end - start)
-        if diff > 300.0:
-            coverage = 360.0
-        else:
-            coverage = diff
+    num_clinical_beams = len(clinical_beams)
+    num_arcs = sum(1 for b in clinical_beams if b.is_arc)
 
-        arc_coverages.append(
-            {
-                "beam_index": idx,
-                "gantry_start": start,
-                "gantry_end": end,
-                "coverage_deg": coverage,
-            }
+    couch_angles = [b.couch_angle for b in clinical_beams]
+    collimator_angles = [b.collimator_angle for b in clinical_beams]
+
+    # Cobertura angular de arcos
+    arc_coverages = []
+    for b in clinical_beams:
+        if not b.is_arc:
+            continue
+        gs = float(b.gantry_start or 0.0)
+        ge = float(b.gantry_end or 0.0)
+        raw = abs(ge - gs)
+        coverage = 360.0 - raw if raw > 180.0 else raw
+        arc_coverages.append({"beam_number": b.beam_number, "coverage_deg": coverage})
+
+    # -------------------------------------------------------
+    # Construir issues según la configuración
+    # -------------------------------------------------------
+    issues: list[str] = []
+
+    # 1) Nº de arcos
+    min_arcs = int(cfg.get("min_num_arcs", 0))
+    max_arcs = int(cfg.get("max_num_arcs", 999))
+    preferred_arcs = cfg.get("preferred_num_arcs", None)
+
+    if num_arcs < min_arcs:
+        issues.append(
+            f"Número de arcos clínicos = {num_arcs} < mínimo esperado {min_arcs}."
+        )
+    if num_arcs > max_arcs:
+        issues.append(
+            f"Número de arcos clínicos = {num_arcs} > máximo razonable {max_arcs}."
         )
 
-        if site == "PROSTATE":
-            if coverage < 150.0:
-                issues.append(
-                    f"Arco {idx+1} con cobertura parcial pequeña ({coverage:.1f}°)."
-                )
-                recs.append(
-                    "Los arcos muy cortos pueden reducir la capacidad de conformación; revisar si se justifica "
-                    "usar arcos parciales o si se prefiere una cobertura más amplia alrededor del PTV."
-                )
+    if preferred_arcs is not None and num_arcs != preferred_arcs:
+        issues.append(
+            f"Número de arcos clínicos = {num_arcs} distinto del preferido ({preferred_arcs})."
+        )
 
-    # --- Construir mensaje global y recomendación ---
-
-    msg_parts = [
-        f"site_inferred={site}",
-        f"technique={tech}",
-        f"num_beams={num_beams}",
-        f"num_arcs={num_arcs}",
+    # 2) Couch angles
+    couch_expected = float(cfg.get("couch_expected", 0.0))
+    couch_tol = float(cfg.get("couch_tolerance", 1.0))
+    bad_couch = [
+        (i, ang)
+        for i, ang in enumerate(couch_angles)
+        if ang is not None and abs(float(ang) - couch_expected) > couch_tol
     ]
-    if couch_angles:
-        msg_parts.append(f"couch_angles={couch_angles}")
-    if coll_angles:
-        msg_parts.append(f"collimator_angles={coll_angles}")
-    if arc_coverages:
-        msg_parts.append(f"arc_coverages={arc_coverages}")
+    if bad_couch:
+        issues.append(
+            f"Se encontraron {len(bad_couch)} beams clínicos con couch angle "
+            f"fuera de {couch_expected}±{couch_tol}°."
+        )
 
-    if issues:
-        passed = False
-        score = 0.6  # advertencia; puedes ajustar según severidad
-        msg = " ; ".join(issues)
-        msg = f"Se encontraron aspectos mejorables en la geometría de beams/arcos: {msg}"
-        recommendation = " ".join(recs)
+    # 3) Colimador
+    families = cfg.get("collimator_families", []) or []
+    bad_coll = []
+    if families:
+        for i, ang in enumerate(collimator_angles):
+            if ang is None:
+                continue
+            a = float(ang)
+            if not any(lo <= a <= hi for (lo, hi) in families):
+                bad_coll.append((i, a))
+        if bad_coll:
+            issues.append(
+                f"{len(bad_coll)} beams clínicos tienen colimador fuera de las familias "
+                f"preferidas {families}."
+            )
+
+    # 4) Cobertura angular de arcos
+    min_cov = float(cfg.get("min_arc_coverage_deg", 0.0))
+    bad_cov = [c for c in arc_coverages if c["coverage_deg"] < min_cov]
+    if min_cov > 0 and bad_cov:
+        issues.append(
+            f"{len(bad_cov)} arcos tienen cobertura < {min_cov:.1f}°."
+        )
+
+    # -------------------------------------------------------
+    # Resultado global + scoring
+    # -------------------------------------------------------
+    passed = len(issues) == 0
+
+    score_ok = float(cfg.get("score_ok", 1.0))
+    score_warn = float(cfg.get("score_warn", 0.6))
+    score_fail = float(cfg.get("score_fail", 0.4))
+    warn_max_issues = int(cfg.get("warn_max_issues", 1))
+
+    if passed:
+        score = score_ok
+        scenario = "OK"
+        msg = "Geometría básica de beams/arcos razonable (dentro de los checks actuales)."
     else:
-        passed = True
-        score = 1.0
-        msg = "Geometría básica de beams/arcos razonable para el sitio/técnica detectados."
-        recommendation = ""
+        if len(issues) <= warn_max_issues:
+            score = score_warn
+        else:
+            score = score_fail
 
-    details = {
-        "site_inferred": site,
-        "technique": tech,
-        "num_beams": num_beams,
-        "num_arcs": num_arcs,
-        "couch_angles": couch_angles,
-        "collimator_angles": coll_angles,
-        "arc_coverages": arc_coverages,
-    }
+        scenario = "ISSUES"
+        msg = " ; ".join(issues)
+
+    rec_texts = get_plan_recommendations("BEAM_GEOM", scenario)
+    rec = format_recommendations_text(rec_texts)
 
     return CheckResult(
         name="Beam geometry",
         passed=passed,
         score=score,
         message=msg,
-        details=details,
+        details={
+            "site_inferred": site,
+            "technique": case.plan.technique,
+            "num_beams_total": len(beams),
+            "num_beams_clinical": num_clinical_beams,
+            "num_arcs": num_arcs,
+            "couch_angles": couch_angles,
+            "collimator_angles": collimator_angles,
+            "arc_coverages": arc_coverages,
+            "config_used": cfg,
+        },
         group="Plan",
-        recommendation=recommendation,
+        recommendation=rec,
     )
 
 
-
-
-
-
+# =====================================================
+# 4) Fraccionamiento razonable
+# =====================================================
 
 def check_fractionation_reasonableness(case: Case) -> CheckResult:
     """
-    Evalúa si el fraccionamiento (dosis total y nº de fracciones) parece razonable
-    para el sitio/técnica, comparándolo contra una tabla interna de esquemas comunes.
+    Evalúa si el esquema de fraccionamiento (dosis total, nº de fracciones)
+    es razonable comparado con una tabla de esquemas típicos para el sitio.
 
-    Por ahora:
-      - Implementado para PROSTATE.
-      - Usa COMMON_SCHEMES["PROSTATE"].
+    Usa el perfil del sitio definido en config.py (SiteProfile):
+      - profile["fractionation_schemes"]  → lista de FractionationScheme
+
+    Las tolerancias y scores vienen de FRACTIONATION_SCORING_CONFIG.
     """
-    site = _infer_site_from_structures(case)
-    technique = getattr(case.plan, "technique", "UNKNOWN") if case.plan else "UNKNOWN"
+    if case.plan is None:
+        rec_texts = get_plan_recommendations("FRACTIONATION", "NO_PLAN")
+        rec = format_recommendations_text(rec_texts)
 
-    total_dose_gy, num_fractions, dose_per_fraction_gy = _get_fractionation_from_plan(case)
+        return CheckResult(
+            name="Fractionation reasonableness",
+            passed=False,
+            score=0.2,
+            message="No hay RTPLAN cargado; no se puede evaluar fraccionamiento.",
+            details={},
+            group="Plan",
+            recommendation=rec,
+        )
 
-    if case.plan is None or total_dose_gy is None or num_fractions is None:
+    total = case.plan.total_dose_gy
+    fx = case.plan.num_fractions
+    dose_per_fx = case.plan.dose_per_fraction_gy
+
+    # Inferimos sitio y config de scoring
+    site = infer_site_from_structs(list(case.structs.keys()))
+    profile = get_site_profile(site)
+    scoring = get_fractionation_scoring_for_site(site)
+
+    dose_tol = float(scoring.get("dose_tol_gy", 1.0))
+    fx_tol = float(scoring.get("fx_tol", 1.0))
+    score_match = float(scoring.get("score_match", 1.0))
+    score_unlisted = float(scoring.get("score_unlisted", 0.7))
+    score_no_info = float(scoring.get("score_no_info", 0.8))
+    score_no_schemes = float(scoring.get("score_no_schemes", 0.9))
+
+    # Si el PlanInfo no tiene info de fraccionamiento, salir de forma suave
+    if total is None or fx is None or fx <= 0:
+        rec_texts = get_plan_recommendations("FRACTIONATION", "NO_INFO")
+        rec = format_recommendations_text(rec_texts)
+
         return CheckResult(
             name="Fractionation reasonableness",
             passed=True,
-            score=1.0,
-            message="No se pudo extraer fraccionamiento del RTPLAN (campos vacíos o ausentes).",
+            score=score_no_info,
+            message="No se pudo extraer información clara de fraccionamiento (dosis total / nº fx).",
             details={
                 "site_inferred": site,
-                "technique": technique,
-                "total_dose_gy": total_dose_gy,
-                "num_fractions": num_fractions,
-                "dose_per_fraction_gy": dose_per_fraction_gy,
+                "total_dose_gy": total,
+                "num_fractions": fx,
+                "dose_per_fraction_gy": dose_per_fx,
             },
+            group="Plan",
+            recommendation=rec,
         )
 
-    # Si no tenemos tabla para el sitio → por ahora no opinamos
-    if site not in COMMON_SCHEMES:
+    schemes = profile.get("fractionation_schemes", [])
+    if not schemes:
+        # No hay tabla de esquemas definidos para este sitio
+        rec_texts = get_plan_recommendations("FRACTIONATION", "NO_SCHEMES")
+        rec = format_recommendations_text(rec_texts)
+
         return CheckResult(
             name="Fractionation reasonableness",
             passed=True,
-            score=1.0,
-            message=f"No hay tabla interna de esquemas comunes para sitio {site or 'DESCONOCIDO'}.",
+            score=score_no_schemes,
+            message=(
+                f"Fraccionamiento {total:.2f} Gy en {fx} fracciones para sitio "
+                f"{site or 'DESCONOCIDO'}. No hay esquemas típicos configurados "
+                "en config.py para este sitio."
+            ),
             details={
                 "site_inferred": site,
-                "technique": technique,
-                "total_dose_gy": total_dose_gy,
-                "num_fractions": num_fractions,
-                "dose_per_fraction_gy": dose_per_fraction_gy,
+                "total_dose_gy": total,
+                "num_fractions": fx,
+                "dose_per_fraction_gy": dose_per_fx,
+                "matched_scheme": None,
+                "closest_schemes": [],
+                "scoring_config": scoring,
             },
+            group="Plan",
+            recommendation=rec,
         )
 
-    schemes = COMMON_SCHEMES[site]
+    # ------------------------------------------------------------
+    # Buscar el esquema más cercano y matches dentro de tolerancias
+    # ------------------------------------------------------------
+    def _distance(sch) -> float:
+        return abs(total - sch["total"]) + abs(fx - sch["fx"])
 
-    # Buscamos el esquema más cercano (por dosis total y nº de fx)
-    def _scheme_distance(sch):
-        dt = abs((sch["total"] or 0) - total_dose_gy)
-        df = abs((sch["fx"] or 0) - num_fractions)
-        # peso simple: 1 Gy ~ 1 fx en valor relativo
-        return dt + df
+    sorted_schemes = sorted(schemes, key=_distance)
+    closest_schemes = sorted_schemes[:3]
 
-    closest_schemes = sorted(schemes, key=_scheme_distance)
-    best = closest_schemes[0] if closest_schemes else None
+    matched_scheme = None
+    for sch in schemes:
+        if abs(total - sch["total"]) <= dose_tol and abs(fx - sch["fx"]) <= fx_tol:
+            matched_scheme = sch
+            break
 
-    # Umbrales de "suficientemente cercano"
-    total_tol_gy = 2.0    # puedes ajustarlo
-    fx_tol = 3            # también ajustable
-
-    matched = None
-    if best is not None:
-        if (abs(best["total"] - total_dose_gy) <= total_tol_gy and
-                abs(best["fx"] - num_fractions) <= fx_tol):
-            matched = best
-
-    details = {
-        "site_inferred": site,
-        "technique": technique,
-        "total_dose_gy": float(total_dose_gy),
-        "num_fractions": int(num_fractions),
-        "dose_per_fraction_gy": float(dose_per_fraction_gy) if dose_per_fraction_gy is not None else None,
-        "matched_scheme": matched,
-        "closest_schemes": closest_schemes,
-    }
-
-    # Mensajes
-    if matched is not None:
+    # ------------------------------------------------------------
+    # Construir mensaje, score y recomendación
+    # ------------------------------------------------------------
+    if matched_scheme is not None:
+        passed = True
+        score = score_match
+        scenario = "MATCH"
         msg = (
-            f"Fraccionamiento {total_dose_gy:.2f} Gy en {num_fractions} fracciones "
-            f"para sitio {site} ({technique}). Esquema compatible con esquema común "
-            f"interno: {matched['label']} ({matched['total']} Gy / {matched['fx']} fx, "
-            f"{matched['tech']}). Puedes revisar, por ejemplo: {matched['ref']}."
+            f"Fraccionamiento {total:.2f} Gy en {fx} fracciones "
+            f"(≈ {dose_per_fx:.2f} Gy/fx). Esquema compatible con "
+            f"'{matched_scheme['label']}' para sitio {site or 'DESCONOCIDO'}."
         )
-        return CheckResult(
-            name="Fractionation reasonableness",
-            passed=True,
-            score=1.0,
-            message=msg,
-            details=details,
+    else:
+        passed = True          # WARNING suave, no FAIL
+        score = score_unlisted
+        scenario = "UNLISTED"
+        msg = (
+            f"Fraccionamiento {total:.2f} Gy en {fx} fracciones "
+            f"(≈ {dose_per_fx:.2f} Gy/fx) para sitio {site or 'DESCONOCIDO'}. "
+            "Esquema no listado en la tabla interna de esquemas típicos; "
+            "revisar guías clínicas y protocolos del servicio."
         )
 
-    # No se encontró esquema cercano → inusual
-    ejemplos_txt = ", ".join(
-        f"{sch['label']} ({sch['total']} Gy / {sch['fx']} fx, {sch['tech']})"
-        for sch in schemes
-    )
+        if closest_schemes:
+            ejemplos = []
+            for sch in closest_schemes:
+                ejemplos.append(
+                    f"{sch['label']} ({sch['total']} Gy / {sch['fx']} fx, "
+                    f"{sch['tech']}, {sch['ref']})"
+                )
+            msg += " Ejemplos de esquemas comunes: " + " | ".join(ejemplos)
 
-    msg = (
-        f"Fraccionamiento {total_dose_gy:.2f} Gy en {num_fractions} fracciones para sitio {site} "
-        f"({technique}). Esquema no listado en la tabla interna de esquemas comunes; "
-        "revisar guías clínicas y protocolos del servicio. "
-        f"Ejemplos de esquemas comunes para {site}: {ejemplos_txt}."
-    )
+    rec_texts = get_plan_recommendations("FRACTIONATION", scenario)
+    rec = format_recommendations_text(rec_texts)
 
-    # No lo marcamos como FAIL, solo advertencia suave
     return CheckResult(
         name="Fractionation reasonableness",
-        passed=True,
-        score=0.7,
+        passed=passed,
+        score=score,
         message=msg,
-        details=details,
+        details={
+            "site_inferred": site,
+            "technique": case.plan.technique,
+            "total_dose_gy": total,
+            "num_fractions": fx,
+            "dose_per_fraction_gy": dose_per_fx,
+            "matched_scheme": matched_scheme,
+            "closest_schemes": closest_schemes,
+            "scoring_config": scoring,
+        },
+        group="Plan",
+        recommendation=rec,
     )
 
 
@@ -925,19 +651,13 @@ def check_fractionation_reasonableness(case: Case) -> CheckResult:
 # 5) Punto de entrada de este módulo
 # =====================================================
 
-
-
-    
 def run_plan_checks(case: Case) -> List[CheckResult]:
     """
     Ejecuta todos los checks relacionados con el plan (RTPLAN).
     """
     results: List[CheckResult] = []
-
     results.append(check_isocenter_vs_ptv(case))
     results.append(check_plan_technique(case))
     results.append(check_beam_geometry(case))
-    results.append(check_fractionation_reasonableness(case))  # ⬅️ NUEVO
-
-
+    results.append(check_fractionation_reasonableness(case))
     return results
