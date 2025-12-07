@@ -10,12 +10,16 @@ Aquí viven cosas como:
 
   - check_dose_loaded          → verificar que hay RTDOSE asociado
   - check_ptv_coverage         → D95 del PTV, etc.
+  - check_ptv_homogeneity      → HI_RTOG y (D2−D98)/D50
   - check_hotspots_global      → Dmax global, V110%
+  - check_ptv_conformity_paddick → CI de Paddick
   - check_oars_dvh_basic       → DVH básicos de OARs (Rectum, Bladder, FemHeads)
 
 Los umbrales y configuraciones vienen de qa.config:
   - HOTSPOT_CONFIG
   - DVH_LIMITS
+  - PTV_HOMOGENEITY_CONFIG
+  - PTV_CONFORMITY_CONFIG
   - perfiles por sitio (SITE_PROFILES)
   - recomendaciones (DOSE_RECOMMENDATIONS)
 """
@@ -33,6 +37,8 @@ from qa.config import (
     get_site_profile,
     get_dose_recommendations,
     format_recommendations_text,
+    get_ptv_homogeneity_config_for_site,
+    get_ptv_conformity_config_for_site,
 )
 
 
@@ -338,7 +344,215 @@ def check_ptv_coverage(case: Case,
 
 
 # =====================================================
-# 3) Hotspots globales
+# 3) Homogeneidad del PTV (HI_RTOG y (D2−D98)/D50)
+# =====================================================
+
+def check_ptv_homogeneity(case: Case) -> CheckResult:
+    """
+    Calcula índices de homogeneidad del PTV:
+
+      - HI_RTOG = Dmax / Dpres
+      - HI_diff = (D2 − D98) / D50
+
+    Estados:
+      - OK: ambos índices en rango "óptimo".
+      - WARN: alguno ligeramente fuera.
+      - FAIL: al menos uno claramente fuera.
+
+    Umbrales por sitio en PTV_HOMOGENEITY_CONFIG[site].
+    """
+    dose = _get_dose_array(case)
+    if dose is None:
+        rec_texts = get_dose_recommendations("PTV_HOMOGENEITY", "NO_DOSE")
+        rec = format_recommendations_text(rec_texts)
+        return CheckResult(
+            name="PTV homogeneity",
+            passed=False,
+            score=0.2,
+            message="No hay dosis cargada; no se pueden evaluar índices de homogeneidad.",
+            details={},
+            group="Dose",
+            recommendation=rec,
+        )
+
+    ptv = _find_ptv_struct(case)
+    if ptv is None:
+        rec_texts = get_dose_recommendations("PTV_HOMOGENEITY", "NO_PTV")
+        rec = format_recommendations_text(rec_texts)
+        return CheckResult(
+            name="PTV homogeneity",
+            passed=False,
+            score=0.3,
+            message="No se encontró un PTV principal; no se puede evaluar homogeneidad.",
+            details={},
+            group="Dose",
+            recommendation=rec,
+        )
+
+    ptv_mask = ptv.mask.astype(bool)
+    ptv_dose_vals = dose[ptv_mask]
+    if ptv_dose_vals.size == 0:
+        rec_texts = get_dose_recommendations("PTV_HOMOGENEITY", "EMPTY_PTV_MASK")
+        rec = format_recommendations_text(rec_texts)
+        return CheckResult(
+            name="PTV homogeneity",
+            passed=False,
+            score=0.3,
+            message=f"PTV '{ptv.name}' sin voxeles válidos (mask vacía).",
+            details={},
+            group="Dose",
+            recommendation=rec,
+        )
+
+    # Métricas de DVH
+    Dmax = float(ptv_dose_vals.max())
+    D2 = _compute_Dx(ptv_dose_vals, 2.0)
+    D50 = _compute_Dx(ptv_dose_vals, 50.0)
+    D98 = _compute_Dx(ptv_dose_vals, 98.0)
+
+    presc = _get_prescription_dose(case, ptv_dose_vals)
+
+    # Config
+    site = infer_site_from_structs(case.structs.keys())
+    cfg = get_ptv_homogeneity_config_for_site(site)
+
+    score_ok = float(cfg.get("score_ok", 1.0))
+    score_warn = float(cfg.get("score_warn", 0.7))
+    score_fail = float(cfg.get("score_fail", 0.3))
+    score_no_info = float(cfg.get("score_no_info", 0.8))
+
+    hi_rtog_ok_max = float(cfg.get("hi_rtog_ok_max", 1.12))
+    hi_rtog_warn_max = float(cfg.get("hi_rtog_warn_max", 1.15))
+    hi_diff_ok_max = float(cfg.get("hi_diff_ok_max", 0.15))
+    hi_diff_warn_max = float(cfg.get("hi_diff_warn_max", 0.20))
+
+    # Cálculo de índices (si se puede)
+    hi_rtog = None
+    if presc > 0:
+        hi_rtog = Dmax / presc
+
+    hi_diff = None
+    if D50 > 0:
+        hi_diff = (D2 - D98) / D50
+
+    if hi_rtog is None and hi_diff is None:
+        rec_texts = get_dose_recommendations("PTV_HOMOGENEITY", "NO_INFO")
+        rec = format_recommendations_text(rec_texts)
+        return CheckResult(
+            name="PTV homogeneity",
+            passed=True,
+            score=score_no_info,
+            message=(
+                "No se pudo calcular HI_RTOG ni HI_diff de forma fiable "
+                "(falta prescripción o D50 del PTV)."
+            ),
+            details={
+                "ptv_name": ptv.name,
+                "Dmax_Gy": Dmax,
+                "D2_Gy": D2,
+                "D50_Gy": D50,
+                "D98_Gy": D98,
+                "prescription_Gy": presc,
+                "HI_RTOG": hi_rtog,
+                "HI_diff": hi_diff,
+                "config_used": cfg,
+            },
+            group="Dose",
+            recommendation=rec,
+        )
+
+    # Severidad combinada
+    severity = "OK"  # OK, WARN, FAIL
+    order = ["OK", "WARN", "FAIL"]
+
+    def worsen(current: str, new_level: str) -> str:
+        return order[max(order.index(current), order.index(new_level))]
+
+    messages: List[str] = []
+
+    # Evaluar HI_RTOG
+    if hi_rtog is not None:
+        if hi_rtog <= hi_rtog_ok_max:
+            pass
+        elif hi_rtog <= hi_rtog_warn_max:
+            severity = worsen(severity, "WARN")
+            messages.append(
+                f"HI_RTOG={hi_rtog:.3f} ligeramente por encima de {hi_rtog_ok_max:.2f}."
+            )
+        else:
+            severity = worsen(severity, "FAIL")
+            messages.append(
+                f"HI_RTOG={hi_rtog:.3f} claramente por encima de {hi_rtog_warn_max:.2f}."
+            )
+
+    # Evaluar HI_diff
+    if hi_diff is not None:
+        if hi_diff <= hi_diff_ok_max:
+            pass
+        elif hi_diff <= hi_diff_warn_max:
+            severity = worsen(severity, "WARN")
+            messages.append(
+                f"(D2−D98)/D50={hi_diff:.3f} ligeramente por encima de {hi_diff_ok_max:.2f}."
+            )
+        else:
+            severity = worsen(severity, "FAIL")
+            messages.append(
+                f"(D2−D98)/D50={hi_diff:.3f} claramente por encima de {hi_diff_warn_max:.2f}."
+            )
+
+    if severity == "OK":
+        scenario = "OK"
+        passed = True
+        score = score_ok
+    elif severity == "WARN":
+        scenario = "WARN"
+        passed = True
+        score = score_warn
+    else:
+        scenario = "FAIL"
+        passed = False
+        score = score_fail
+
+    base_msg = (
+        f"Dmax(PTV)={Dmax:.2f} Gy, D2={D2:.2f} Gy, D50={D50:.2f} Gy, "
+        f"D98={D98:.2f} Gy, Rx≈{presc:.2f} Gy. "
+    )
+    msg_indices = []
+    if hi_rtog is not None:
+        msg_indices.append(f"HI_RTOG=Dmax/Rx≈{hi_rtog:.3f}")
+    if hi_diff is not None:
+        msg_indices.append(f"HI_diff=(D2−D98)/D50≈{hi_diff:.3f}")
+    base_msg += " ; ".join(msg_indices)
+    if messages:
+        base_msg += " | " + " | ".join(messages)
+
+    rec_texts = get_dose_recommendations("PTV_HOMOGENEITY", scenario)
+    rec = format_recommendations_text(rec_texts)
+
+    return CheckResult(
+        name="PTV homogeneity",
+        passed=passed,
+        score=score,
+        message=base_msg,
+        details={
+            "ptv_name": ptv.name,
+            "Dmax_Gy": Dmax,
+            "D2_Gy": D2,
+            "D50_Gy": D50,
+            "D98_Gy": D98,
+            "prescription_Gy": presc,
+            "HI_RTOG": hi_rtog,
+            "HI_diff": hi_diff,
+            "severity": severity,
+            "config_used": cfg,
+        },
+        group="Dose",
+        recommendation=rec,
+    )
+
+
+# =====================================================
+# 4) Hotspots globales
 # =====================================================
 
 def check_hotspots_global(case: Case) -> CheckResult:
@@ -470,7 +684,181 @@ def check_hotspots_global(case: Case) -> CheckResult:
 
 
 # =====================================================
-# 4) DVH básicos de OARs
+# 5) Conformidad del PTV (CI de Paddick)
+# =====================================================
+
+def check_ptv_conformity_paddick(case: Case) -> CheckResult:
+    """
+    Calcula el índice de conformidad de Paddick para el PTV:
+
+        CI = (TV_PIV^2) / (TV * PIV)
+
+      - TV: volumen del PTV
+      - PIV: volumen de la isodosis de prescripción
+      - TV_PIV: volumen de intersección (PTV ∩ isodosis)
+
+    La isodosis de referencia se define como:
+        dose >= prescription_isodose_rel * Rx
+
+    con prescription_isodose_rel configurado por sitio en PTV_CONFORMITY_CONFIG.
+    """
+    dose = _get_dose_array(case)
+    if dose is None:
+        rec_texts = get_dose_recommendations("PTV_CONFORMITY", "NO_DOSE")
+        rec = format_recommendations_text(rec_texts)
+        return CheckResult(
+            name="PTV conformity (Paddick)",
+            passed=False,
+            score=0.2,
+            message="No hay dosis cargada; no se puede evaluar la conformidad.",
+            details={},
+            group="Dose",
+            recommendation=rec,
+        )
+
+    ptv = _find_ptv_struct(case)
+    if ptv is None:
+        rec_texts = get_dose_recommendations("PTV_CONFORMITY", "NO_PTV")
+        rec = format_recommendations_text(rec_texts)
+        return CheckResult(
+            name="PTV conformity (Paddick)",
+            passed=False,
+            score=0.3,
+            message="No se encontró un PTV principal; no se puede calcular CI (Paddick).",
+            details={},
+            group="Dose",
+            recommendation=rec,
+        )
+
+    ptv_mask = ptv.mask.astype(bool)
+    if ptv_mask.sum() == 0:
+        rec_texts = get_dose_recommendations("PTV_CONFORMITY", "EMPTY_PTV_MASK")
+        rec = format_recommendations_text(rec_texts)
+        return CheckResult(
+            name="PTV conformity (Paddick)",
+            passed=False,
+            score=0.3,
+            message=f"PTV '{ptv.name}' sin voxeles válidos en el grid de dosis.",
+            details={},
+            group="Dose",
+            recommendation=rec,
+        )
+
+    ptv_dose_vals = dose[ptv_mask]
+    presc = _get_prescription_dose(case, ptv_dose_vals)
+
+    site = infer_site_from_structs(case.structs.keys())
+    cfg = get_ptv_conformity_config_for_site(site)
+
+    score_ok = float(cfg.get("score_ok", 1.0))
+    score_warn = float(cfg.get("score_warn", 0.7))
+    score_fail = float(cfg.get("score_fail", 0.3))
+    score_no_info = float(cfg.get("score_no_info", 0.8))
+
+    iso_rel = float(cfg.get("prescription_isodose_rel", 1.0))
+
+    if presc <= 0:
+        rec_texts = get_dose_recommendations("PTV_CONFORMITY", "NO_INFO")
+        rec = format_recommendations_text(rec_texts)
+        return CheckResult(
+            name="PTV conformity (Paddick)",
+            passed=True,
+            score=score_no_info,
+            message=(
+                "No se pudo determinar una dosis de prescripción clara; no se calcula CI de Paddick."
+            ),
+            details={
+                "ptv_name": ptv.name,
+                "prescription_Gy": presc,
+                "config_used": cfg,
+            },
+            group="Dose",
+            recommendation=rec,
+        )
+
+    # Volúmenes en voxeles (el factor de volumen de voxel se cancela en el CI)
+    TV = int(ptv_mask.sum())
+
+    iso_th = iso_rel * presc
+    piv_mask = dose >= iso_th
+    PIV = int(piv_mask.sum())
+    TV_PIV = int(np.logical_and(ptv_mask, piv_mask).sum())
+
+    CI = None
+    if TV > 0 and PIV > 0 and TV_PIV > 0:
+        CI = (TV_PIV ** 2) / (TV * PIV)
+
+    if CI is None:
+        rec_texts = get_dose_recommendations("PTV_CONFORMITY", "NO_INFO")
+        rec = format_recommendations_text(rec_texts)
+        return CheckResult(
+            name="PTV conformity (Paddick)",
+            passed=True,
+            score=score_no_info,
+            message=(
+                "No se pudo calcular CI de Paddick (TV, PIV o intersección nulos). "
+                "Posible mala cobertura o configuración atípica de isodosis."
+            ),
+            details={
+                "ptv_name": ptv.name,
+                "TV_vox": TV,
+                "PIV_vox": PIV,
+                "TV_PIV_vox": TV_PIV,
+                "CI_Paddick": None,
+                "iso_rel": iso_rel,
+                "prescription_Gy": presc,
+                "config_used": cfg,
+            },
+            group="Dose",
+            recommendation=rec,
+        )
+
+    ci_ok_min = float(cfg.get("ci_ok_min", 0.75))
+    ci_warn_min = float(cfg.get("ci_warn_min", 0.65))
+
+    if CI >= ci_ok_min:
+        scenario = "OK"
+        passed = True
+        score = score_ok
+    elif CI >= ci_warn_min:
+        scenario = "WARN"
+        passed = True
+        score = score_warn
+    else:
+        scenario = "FAIL"
+        passed = False
+        score = score_fail
+
+    msg = (
+        f"CI_Paddick≈{CI:.3f} (TV={TV} vox, PIV={PIV} vox, TV∩PIV={TV_PIV} vox) "
+        f"para isodosis ≥{iso_rel*100:.0f}% de Rx≈{presc:.2f} Gy."
+    )
+
+    rec_texts = get_dose_recommendations("PTV_CONFORMITY", scenario)
+    rec = format_recommendations_text(rec_texts)
+
+    return CheckResult(
+        name="PTV conformity (Paddick)",
+        passed=passed,
+        score=score,
+        message=msg,
+        details={
+            "ptv_name": ptv.name,
+            "TV_vox": TV,
+            "PIV_vox": PIV,
+            "TV_PIV_vox": TV_PIV,
+            "CI_Paddick": CI,
+            "iso_rel": iso_rel,
+            "prescription_Gy": presc,
+            "config_used": cfg,
+        },
+        group="Dose",
+        recommendation=rec,
+    )
+
+
+# =====================================================
+# 6) DVH básicos de OARs
 # =====================================================
 
 def check_oars_dvh_basic(case: Case) -> CheckResult:
@@ -643,7 +1031,7 @@ def check_oars_dvh_basic(case: Case) -> CheckResult:
 
 
 # =====================================================
-# 5) Orquestador de checks de dosis
+# 7) Orquestador de checks de dosis
 # =====================================================
 
 def run_dose_checks(case: Case) -> List[CheckResult]:
@@ -653,12 +1041,16 @@ def run_dose_checks(case: Case) -> List[CheckResult]:
     Por ahora ejecuta:
       - check_dose_loaded
       - check_ptv_coverage
+      - check_ptv_homogeneity
       - check_hotspots_global
+      - check_ptv_conformity_paddick
       - check_oars_dvh_basic
     """
     results: List[CheckResult] = []
     results.append(check_dose_loaded(case))
     results.append(check_ptv_coverage(case))
+    results.append(check_ptv_homogeneity(case))
     results.append(check_hotspots_global(case))
+    results.append(check_ptv_conformity_paddick(case))
     results.append(check_oars_dvh_basic(case))
     return results

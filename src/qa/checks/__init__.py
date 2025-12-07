@@ -1,48 +1,39 @@
 # src/qa/checks/__init__.py
 
 from typing import List
-
 from core.case import Case, CheckResult
 
-from . import ct, structures, plan, dose
+from .ct import run_ct_checks
+from .structures import run_structures_checks
+from .plan import run_plan_checks
+from .dose import run_dose_checks
+# (si tienes otros grupos, añádelos aquí)
 
 
 def run_all_checks(case: Case) -> List[CheckResult]:
     """
-    Orquestador de todos los checks de Auto-QA.
-
-    Agrupa los checks en cuatro bloques:
-      - CT
-      - Structures
-      - Plan
-      - Dose
+    Orquestador global de checks.
+    Devuelve la lista de todos los CheckResult que luego verá la UI.
     """
     results: List[CheckResult] = []
 
-    # --- CT ---
-    results.append(ct.check_ct_geometry(case))
+    # CT
+    results.extend(run_ct_checks(case))
 
-    # --- Structures ---
-    # Ajusta aquí si tu módulo `structures` usa otro nombre:
-    # por ejemplo `run_structural_checks` o similar.
-    if hasattr(structures, "run_structural_checks"):
-        results.extend(structures.run_structural_checks(case))
-    else:
-        # Si tienes checks sueltos, puedes llamarlos uno por uno:
-        # results.append(structures.check_mandatory_structures(case))
-        # results.append(structures.check_ptv_volume(case))
-        # etc.
-        pass
+    # Structures
+    results.extend(run_structures_checks(case))
 
-    # --- Plan ---
-    if hasattr(plan, "run_plan_checks"):
-        results.extend(plan.run_plan_checks(case))
+    # Plan
+    results.extend(run_plan_checks(case))
 
-    # --- Dose ---
-    if hasattr(dose, "run_dose_checks"):
-        results.extend(dose.run_dose_checks(case))
+    # Dose
+    results.extend(run_dose_checks(case))
+
+    # Otros grupos, si tienes
+    # results.extend(run_other_checks(case))
 
     return results
+
 
 
 """

@@ -806,6 +806,279 @@ def get_beam_geom_config_for_site(site: str | None) -> BeamGeometryConfig:
     key = site.upper()
     return BEAM_GEOMETRY_CONFIG.get(key, BEAM_GEOMETRY_CONFIG["DEFAULT"])
 
+    # ============================================================
+# Config: Consistencia de prescripción
+# ============================================================
+
+PRESCRIPTION_CONFIG = {
+    "DEFAULT": {
+        # Tolerancias para comparar:
+        #  total_dose_gy vs num_fractions * dose_per_fraction_gy
+        "abs_tol_ok_gy": 0.2,     # |ΔGy| <= 0.2 Gy → OK
+        "rel_tol_ok": 0.01,       # |Δ|/Rx <= 1% → OK
+
+        "abs_tol_warn_gy": 1.0,   # hasta 1 Gy de diferencia → WARN
+        "rel_tol_warn": 0.05,     # hasta 5% → WARN
+
+        # Scores
+        "score_ok": 1.0,
+        "score_warn": 0.7,
+        "score_fail": 0.3,
+        "score_no_info": 0.8,
+
+        # Si deseas, podrías usar tolerancias distintas para DVH vs Rx.
+        # Por ahora, usamos las mismas.
+    },
+
+    # Ejemplo de sitio específico (puedes ajustar o copiar para otros):
+    "PROSTATE": {
+        "abs_tol_ok_gy": 0.2,
+        "rel_tol_ok": 0.01,
+        "abs_tol_warn_gy": 1.0,
+        "rel_tol_warn": 0.05,
+        "score_ok": 1.0,
+        "score_warn": 0.7,
+        "score_fail": 0.3,
+        "score_no_info": 0.8,
+    },
+}
+
+
+def get_prescription_config_for_site(site: str | None) -> dict:
+    site_up = (site or "DEFAULT").upper()
+    return PRESCRIPTION_CONFIG.get(site_up, PRESCRIPTION_CONFIG["DEFAULT"])
+
+
+# ============================================================
+# Config: MU totales / MU por Gy (plan efficiency / sanity)
+# ============================================================
+
+PLAN_MU_CONFIG = {
+    "DEFAULT": {
+        # Rango razonable de MU/Gy para planes fotones tipo IMRT/VMAT.
+        # Son valores ilustrativos; ajústalos a tu realidad clínica.
+        "min_mu_per_gy": 30.0,
+        "max_mu_per_gy": 300.0,
+
+        # Si está fuera del rango [min,max] pero dentro de un margen
+        # relativo (por ejemplo ±20%), lo consideramos WARN en lugar de FAIL.
+        "warn_margin_rel": 0.2,   # 20%
+
+        "score_ok": 1.0,
+        "score_warn": 0.7,
+        "score_fail": 0.3,
+        "score_no_info": 0.8,
+    },
+
+    "PROSTATE": {
+        # Para próstata VMAT/IMRT típico (ajusta a tu servicio/Halcyon)
+        "min_mu_per_gy": 50.0,
+        "max_mu_per_gy": 250.0,
+        "warn_margin_rel": 0.2,
+        "score_ok": 1.0,
+        "score_warn": 0.7,
+        "score_fail": 0.3,
+        "score_no_info": 0.8,
+    },
+}
+
+
+def get_plan_mu_config_for_site(site: str | None) -> dict:
+    site_up = (site or "DEFAULT").upper()
+    return PLAN_MU_CONFIG.get(site_up, PLAN_MU_CONFIG["DEFAULT"])
+
+
+# ============================================================
+# Config: Complejidad / modulación del plan
+# ============================================================
+
+PLAN_MODULATION_CONFIG = {
+    "DEFAULT": {
+        # CP = control points
+        "min_cp_per_arc_ok": 40,    # por debajo es sospechosamente poco muestreado
+        "max_cp_per_arc_ok": 200,   # por encima podría ser demasiado denso
+        "max_cp_per_arc_warn": 260, # por encima → FAIL directo
+
+        # Apertura promedio (cm²) – si disponemos del dato:
+        "min_mean_area_cm2_ok": 20.0,   # campos muy pequeños en promedio → alta modulación
+        "min_mean_area_cm2_warn": 10.0,
+
+        # Coeficiente de variación (std/mean) de las aperturas:
+        "max_area_cv_ok": 0.8,      # > 0.8 → modulación muy variable
+        "max_area_cv_warn": 1.2,
+
+        "score_ok": 1.0,
+        "score_warn": 0.7,
+        "score_fail": 0.3,
+        "score_no_info": 0.8,
+    },
+
+    "PROSTATE": {
+        "min_cp_per_arc_ok": 60,
+        "max_cp_per_arc_ok": 200,
+        "max_cp_per_arc_warn": 260,
+        "min_mean_area_cm2_ok": 25.0,
+        "min_mean_area_cm2_warn": 15.0,
+        "max_area_cv_ok": 0.8,
+        "max_area_cv_warn": 1.2,
+        "score_ok": 1.0,
+        "score_warn": 0.7,
+        "score_fail": 0.3,
+        "score_no_info": 0.8,
+    },
+}
+
+from typing import Dict, Any, Optional
+
+# ============================================================
+# Config: patrones angulares por sitio y técnica
+# ============================================================
+
+ANGULAR_PATTERN_CONFIG: Dict[str, Dict[str, Dict[str, Any]]] = {
+    # Config genérica por defecto
+    "DEFAULT": {
+        # IMRT / STATIC: permitir pares opuestos por defecto
+        "IMRT": {
+            "check_opposed_pairs": False,
+            "opp_tol_deg": 5.0,
+            "imrt_fail_on_opposed": False,
+            "ignore_beam_name_patterns": ["CBCT", "KV", "IMAGING"],
+            "score_ok": 1.0,
+            "score_warn": 0.7,
+            "score_fail": 0.3,
+            "score_no_info": 0.8,
+        },
+        "STATIC": {
+            "check_opposed_pairs": False,
+            "opp_tol_deg": 5.0,
+            "imrt_fail_on_opposed": False,
+            "ignore_beam_name_patterns": ["CBCT", "KV", "IMAGING"],
+            "score_ok": 1.0,
+            "score_warn": 0.7,
+            "score_fail": 0.3,
+            "score_no_info": 0.8,
+        },
+        # 3D-CRT: por defecto no exigimos box perfecto
+        "3D-CRT": {
+            "expect_box_pattern": False,
+            "box_angles_deg": [0.0, 90.0, 180.0, 270.0],
+            "angle_tol_deg": 7.0,
+            "ignore_beam_name_patterns": ["CBCT", "KV", "IMAGING"],
+            "score_ok": 1.0,
+            "score_warn": 0.7,
+            "score_fail": 0.3,
+            "score_no_info": 0.8,
+        },
+        # VMAT: por defecto no exigimos arcos complementarios
+        "VMAT": {
+            "expect_two_complementary_arcs": False,
+            "min_total_coverage_deg": 320.0,
+            "max_arc_diff_deg": 40.0,
+            "gantry_match_tol_deg": 20.0,
+            "ignore_beam_name_patterns": ["CBCT", "KV", "IMAGING"],
+            "score_ok": 1.0,
+            "score_warn": 0.7,
+            "score_fail": 0.3,
+            "score_no_info": 0.8,
+        },
+        # Fallback genérico
+        "ANY": {
+            "ignore_beam_name_patterns": ["CBCT", "KV", "IMAGING"],
+            "score_ok": 1.0,
+            "score_warn": 0.7,
+            "score_fail": 0.3,
+            "score_no_info": 0.8,
+        },
+    },
+
+    # Ejemplo específico para PRÓSTATA (lo que tú quieres)
+    "PROSTATE": {
+        # IMRT próstata: NO permitir campos diametralmente opuestos
+        "IMRT": {
+            "check_opposed_pairs": True,
+            "opp_tol_deg": 5.0,
+            "imrt_fail_on_opposed": False,  # WARN por defecto
+            "ignore_beam_name_patterns": ["CBCT", "KV", "IMAGING"],
+            "score_ok": 1.0,
+            "score_warn": 0.7,
+            "score_fail": 0.3,
+            "score_no_info": 0.8,
+        },
+        "STATIC": {
+            "check_opposed_pairs": True,
+            "opp_tol_deg": 5.0,
+            "imrt_fail_on_opposed": False,
+            "ignore_beam_name_patterns": ["CBCT", "KV", "IMAGING"],
+            "score_ok": 1.0,
+            "score_warn": 0.7,
+            "score_fail": 0.3,
+            "score_no_info": 0.8,
+        },
+        # 3D-CRT próstata: exigir box 4 campos (0, 90, 180, 270)
+        "3D-CRT": {
+            "expect_box_pattern": True,
+            "box_angles_deg": [0.0, 90.0, 180.0, 270.0],
+            "angle_tol_deg": 7.0,
+            "ignore_beam_name_patterns": ["CBCT", "KV", "IMAGING"],
+            "score_ok": 1.0,
+            "score_warn": 0.7,
+            "score_fail": 0.3,
+            "score_no_info": 0.8,
+        },
+        # VMAT próstata: 2 arcos complementarios
+        "VMAT": {
+            "expect_two_complementary_arcs": True,
+            "min_total_coverage_deg": 320.0,
+            "max_arc_diff_deg": 40.0,
+            "gantry_match_tol_deg": 20.0,
+            "ignore_beam_name_patterns": ["CBCT", "KV", "IMAGING"],
+            "score_ok": 1.0,
+            "score_warn": 0.7,
+            "score_fail": 0.3,
+            "score_no_info": 0.8,
+        },
+    },
+}
+
+
+def get_angular_pattern_config_for_site(
+    site: Optional[str],
+    technique: Optional[str],
+) -> Dict[str, Any]:
+    """
+    Devuelve la configuración de patrones angulares para un sitio y técnica.
+
+    Prioridad:
+      1) ANGULAR_PATTERN_CONFIG[site_upper][tech_upper]
+      2) ANGULAR_PATTERN_CONFIG[site_upper]['ANY']
+      3) ANGULAR_PATTERN_CONFIG['DEFAULT'][tech_upper]
+      4) ANGULAR_PATTERN_CONFIG['DEFAULT']['ANY']
+    """
+    site_key = (site or "DEFAULT").upper()
+    tech_key = (technique or "ANY").upper()
+
+    site_cfg = ANGULAR_PATTERN_CONFIG.get(site_key)
+    default_site_cfg = ANGULAR_PATTERN_CONFIG["DEFAULT"]
+
+    # Intento 1: config específica de sitio
+    if site_cfg is not None:
+        if tech_key in site_cfg:
+            return site_cfg[tech_key]
+        if "ANY" in site_cfg:
+            return site_cfg["ANY"]
+
+    # Intento 2: fallback a DEFAULT
+    if tech_key in default_site_cfg:
+        return default_site_cfg[tech_key]
+    return default_site_cfg["ANY"]
+
+
+
+def get_plan_modulation_config_for_site(site: str | None) -> dict:
+    site_up = (site or "DEFAULT").upper()
+    return PLAN_MODULATION_CONFIG.get(site_up, PLAN_MODULATION_CONFIG["DEFAULT"])
+
+
 
 # ------------------------------------------------------------
 # C.4) Estructuras obligatorias por sitio
@@ -1074,6 +1347,280 @@ DVH_SCORING_CONFIG: Dict[str, Dict[str, float]] = {
     },
 }
 
+# ============================================================
+# Config: Overlap PTV–OAR por sitio
+# ============================================================
+
+STRUCT_OVERLAP_CONFIG: Dict[str, Dict[str, Any]] = {
+    "DEFAULT": {
+        "oars": {
+            "RECTUM": {
+                "patterns": ["RECT", "RECTO"],
+                # Fracción del OAR ocupada por el PTV
+                "max_frac_oar_ok": 0.30,
+                "max_frac_oar_warn": 0.50,
+                # Fracción del PTV dentro del OAR
+                "max_frac_ptv_ok": 0.30,
+                "max_frac_ptv_warn": 0.50,
+            },
+            "BLADDER": {
+                "patterns": ["BLADDER", "VEJIGA"],
+                "max_frac_oar_ok": 0.40,
+                "max_frac_oar_warn": 0.60,
+                "max_frac_ptv_ok": 0.40,
+                "max_frac_ptv_warn": 0.60,
+            },
+            "FEMORAL_HEAD_L": {
+                "patterns": ["FEMHEADNECK_L", "FEMUR_L", "FEMORAL_L"],
+                # Idealmente el PTV no debería invadir femoral
+                "max_frac_oar_ok": 0.02,
+                "max_frac_oar_warn": 0.05,
+                "max_frac_ptv_ok": 0.02,
+                "max_frac_ptv_warn": 0.05,
+            },
+            "FEMORAL_HEAD_R": {
+                "patterns": ["FEMHEADNECK_R", "FEMUR_R", "FEMORAL_R"],
+                "max_frac_oar_ok": 0.02,
+                "max_frac_oar_warn": 0.05,
+                "max_frac_ptv_ok": 0.02,
+                "max_frac_ptv_warn": 0.05,
+            },
+        },
+        "score_ok": 1.0,
+        "score_warn": 0.7,
+        "score_fail": 0.3,
+        "score_no_info": 0.8,
+    },
+
+    # Ejemplo específico de PROSTATE (puedes tunearlo distinto)
+    "PROSTATE": {
+        "oars": {
+            "RECTUM": {
+                "patterns": ["RECT", "RECTO"],
+                "max_frac_oar_ok": 0.30,
+                "max_frac_oar_warn": 0.50,
+                "max_frac_ptv_ok": 0.30,
+                "max_frac_ptv_warn": 0.50,
+            },
+            "BLADDER": {
+                "patterns": ["BLADDER", "VEJIGA"],
+                "max_frac_oar_ok": 0.40,
+                "max_frac_oar_warn": 0.60,
+                "max_frac_ptv_ok": 0.40,
+                "max_frac_ptv_warn": 0.60,
+            },
+            "FEMORAL_HEAD_L": {
+                "patterns": ["FEMHEADNECK_L", "FEMUR_L", "FEMORAL_L"],
+                "max_frac_oar_ok": 0.02,
+                "max_frac_oar_warn": 0.05,
+                "max_frac_ptv_ok": 0.02,
+                "max_frac_ptv_warn": 0.05,
+            },
+            "FEMORAL_HEAD_R": {
+                "patterns": ["FEMHEADNECK_R", "FEMUR_R", "FEMORAL_R"],
+                "max_frac_oar_ok": 0.02,
+                "max_frac_oar_warn": 0.05,
+                "max_frac_ptv_ok": 0.02,
+                "max_frac_ptv_warn": 0.05,
+            },
+        },
+        "score_ok": 1.0,
+        "score_warn": 0.7,
+        "score_fail": 0.3,
+        "score_no_info": 0.8,
+    },
+}
+
+
+def get_struct_overlap_config_for_site(site: Optional[str]) -> Dict[str, Any]:
+    """
+    Devuelve configuración de overlap PTV–OAR para el sitio dado.
+    """
+    site_key = (site or "DEFAULT").upper()
+    return STRUCT_OVERLAP_CONFIG.get(site_key, STRUCT_OVERLAP_CONFIG["DEFAULT"])
+
+# ============================================================
+# Config: Consistencia de lateralidad (LEFT vs RIGHT)
+# ============================================================
+
+LATERALITY_CONFIG: Dict[str, Dict[str, Any]] = {
+    "DEFAULT": {
+        "pairs": [
+            {
+                "label": "Femoral heads",
+                "left_patterns": ["FEMHEADNECK_L", "FEMUR_L", "FEMORAL_L"],
+                "right_patterns": ["FEMHEADNECK_R", "FEMUR_R", "FEMORAL_R"],
+                # Rango “normal” del ratio V_L / V_R
+                "ratio_ok_min": 0.5,
+                "ratio_ok_max": 2.0,
+                # Rango extendido donde se considera WARN
+                "ratio_warn_min": 0.3,
+                "ratio_warn_max": 3.0,
+            },
+            {
+                "label": "Lungs",
+                "left_patterns": ["LUNG_L"],
+                "right_patterns": ["LUNG_R"],
+                "ratio_ok_min": 0.5,
+                "ratio_ok_max": 2.0,
+                "ratio_warn_min": 0.3,
+                "ratio_warn_max": 3.0,
+            },
+        ],
+        "score_ok": 1.0,
+        "score_warn": 0.7,
+        "score_fail": 0.3,
+        "score_no_info": 0.9,
+    },
+
+    "PROSTATE": {
+        "pairs": [
+            {
+                "label": "Femoral heads",
+                "left_patterns": ["FEMHEADNECK_L", "FEMUR_L", "FEMORAL_L"],
+                "right_patterns": ["FEMHEADNECK_R", "FEMUR_R", "FEMORAL_R"],
+                "ratio_ok_min": 0.5,
+                "ratio_ok_max": 2.0,
+                "ratio_warn_min": 0.3,
+                "ratio_warn_max": 3.0,
+            },
+        ],
+        "score_ok": 1.0,
+        "score_warn": 0.7,
+        "score_fail": 0.3,
+        "score_no_info": 0.9,
+    },
+}
+
+
+def get_laterality_config_for_site(site: Optional[str]) -> Dict[str, Any]:
+    """
+    Devuelve la configuración de lateralidad para el sitio dado.
+    """
+    site_key = (site or "DEFAULT").upper()
+    return LATERALITY_CONFIG.get(site_key, LATERALITY_CONFIG["DEFAULT"])
+
+
+# ============================================================
+# Config: Homogeneidad del PTV por sitio
+# ============================================================
+
+PTV_HOMOGENEITY_CONFIG: Dict[str, Dict[str, Any]] = {
+    "DEFAULT": {
+        # HI_RTOG = Dmax / Dpres
+        "hi_rtog_ok_max": 1.12,
+        "hi_rtog_warn_max": 1.15,
+
+        # HI_diff = (D2 - D98) / D50
+        "hi_diff_ok_max": 0.15,
+        "hi_diff_warn_max": 0.20,
+
+        # Scores
+        "score_ok": 1.0,
+        "score_warn": 0.7,
+        "score_fail": 0.3,
+        "score_no_info": 0.8,
+    },
+
+    # Ejemplo específico de próstata (puedes ajustar luego)
+    "PROSTATE": {
+        "hi_rtog_ok_max": 1.12,
+        "hi_rtog_warn_max": 1.15,
+        "hi_diff_ok_max": 0.15,
+        "hi_diff_warn_max": 0.20,
+        "score_ok": 1.0,
+        "score_warn": 0.7,
+        "score_fail": 0.3,
+        "score_no_info": 0.8,
+    },
+}
+
+
+def get_ptv_homogeneity_config_for_site(site: Optional[str]) -> Dict[str, Any]:
+    """
+    Devuelve la configuración de homogeneidad del PTV para el sitio dado.
+    """
+    site_key = (site or "DEFAULT").upper()
+    return PTV_HOMOGENEITY_CONFIG.get(site_key, PTV_HOMOGENEITY_CONFIG["DEFAULT"])
+
+
+
+# ============================================================
+# Config: Conformidad del PTV (Paddick) por sitio
+# ============================================================
+
+PTV_CONFORMITY_CONFIG: Dict[str, Dict[str, Any]] = {
+    "DEFAULT": {
+        # Isodosis de referencia para el CI (fracción de Rx)
+        # 1.0 → 100% Rx, 0.95 → 95% Rx, etc.
+        "prescription_isodose_rel": 1.0,
+
+        # Umbrales típicos de CI de Paddick
+        # CI = (TV_PIV^2) / (TV * PIV)
+        "ci_ok_min": 0.75,
+        "ci_warn_min": 0.65,
+
+        "score_ok": 1.0,
+        "score_warn": 0.7,
+        "score_fail": 0.3,
+        "score_no_info": 0.8,
+    },
+
+    "PROSTATE": {
+        "prescription_isodose_rel": 1.0,
+        "ci_ok_min": 0.75,
+        "ci_warn_min": 0.65,
+        "score_ok": 1.0,
+        "score_warn": 0.7,
+        "score_fail": 0.3,
+        "score_no_info": 0.8,
+    },
+}
+
+
+def get_ptv_conformity_config_for_site(site: Optional[str]) -> Dict[str, Any]:
+    """
+    Devuelve la configuración de CI (Paddick) para el sitio dado.
+    """
+    site_key = (site or "DEFAULT").upper()
+    return PTV_CONFORMITY_CONFIG.get(site_key, PTV_CONFORMITY_CONFIG["DEFAULT"])
+
+# ------------------------------------------------------------
+# C.13) Configuración de scoring para fraccionamiento
+# ------------------------------------------------------------
+
+FRACTIONATION_SCORING_CONFIG: Dict[str, Dict[str, float]] = {
+    "PROSTATE": {
+        # Tolerancias para considerar un "match" con un esquema típico
+        "dose_tol_gy": 1.0,
+        "fx_tol": 1.0,  # en nº de fracciones
+
+        # Scores
+        "score_match": 1.0,       # cuando matchea un esquema típico
+        "score_unlisted": 0.7,    # esquema raro pero con info
+        "score_no_info": 0.8,     # no se pudo extraer fraccionamiento
+        "score_no_schemes": 0.9,  # no hay tabla de esquemas para ese sitio
+    },
+
+    "DEFAULT": {
+        "dose_tol_gy": 1.0,
+        "fx_tol": 1.0,
+        "score_match": 1.0,
+        "score_unlisted": 0.7,
+        "score_no_info": 0.8,
+        "score_no_schemes": 0.9,
+    },
+}
+
+
+def get_fractionation_scoring_for_site(site: str | None) -> Dict[str, float]:
+    if not site:
+        return FRACTIONATION_SCORING_CONFIG["DEFAULT"]
+    key = site.upper()
+    return FRACTIONATION_SCORING_CONFIG.get(key, FRACTIONATION_SCORING_CONFIG["DEFAULT"])
+
+#=================================================================================================================================
+# SCORES AGREGADOS 
 
 # ------------------------------------------------------------
 # C.11) Configuración de agregación global (pesos de checks)
@@ -1090,6 +1637,10 @@ AGGREGATE_SCORING_CONFIG: Dict[str, Dict[str, Any]] = {
         "check_weights": {
             # ---- CT ----
             "CT geometry consistency": 1.0,
+            "CT HU (air/water)": 1.0,
+            "CT FOV minimum": 1.0,
+            "CT couch presence": 1.0,
+            "CT patient clipping": 1.0,
 
             # ---- Structures ----
             "Mandatory structures present": 1.5,
@@ -1102,6 +1653,9 @@ AGGREGATE_SCORING_CONFIG: Dict[str, Dict[str, Any]] = {
             "Plan technique consistency": 1.0,
             "Beam geometry": 1.0,
             "Fractionation reasonableness": 0.5,
+            "Prescription consistency": 1.0,
+            "Plan MU sanity": 0.8,
+            "Plan modulation complexity": 0.8,
 
             # ---- Dose ----
             "Dose loaded": 1.0,
@@ -1122,6 +1676,11 @@ def get_aggregate_scoring_config(site: str | None = None) -> Dict[str, Any]:
     """
     key = (site or "DEFAULT").upper()
     return AGGREGATE_SCORING_CONFIG.get(key, AGGREGATE_SCORING_CONFIG["DEFAULT"])
+
+
+
+
+
 
 
 # ------------------------------------------------------------
@@ -1185,39 +1744,7 @@ def get_site_profile(site: str | None) -> SiteProfile:
     return SITE_PROFILES.get(key, SITE_PROFILES["DEFAULT"])
 
 
-# ------------------------------------------------------------
-# C.13) Configuración de scoring para fraccionamiento
-# ------------------------------------------------------------
 
-FRACTIONATION_SCORING_CONFIG: Dict[str, Dict[str, float]] = {
-    "PROSTATE": {
-        # Tolerancias para considerar un "match" con un esquema típico
-        "dose_tol_gy": 1.0,
-        "fx_tol": 1.0,  # en nº de fracciones
-
-        # Scores
-        "score_match": 1.0,       # cuando matchea un esquema típico
-        "score_unlisted": 0.7,    # esquema raro pero con info
-        "score_no_info": 0.8,     # no se pudo extraer fraccionamiento
-        "score_no_schemes": 0.9,  # no hay tabla de esquemas para ese sitio
-    },
-
-    "DEFAULT": {
-        "dose_tol_gy": 1.0,
-        "fx_tol": 1.0,
-        "score_match": 1.0,
-        "score_unlisted": 0.7,
-        "score_no_info": 0.8,
-        "score_no_schemes": 0.9,
-    },
-}
-
-
-def get_fractionation_scoring_for_site(site: str | None) -> Dict[str, float]:
-    if not site:
-        return FRACTIONATION_SCORING_CONFIG["DEFAULT"]
-    key = site.upper()
-    return FRACTIONATION_SCORING_CONFIG.get(key, FRACTIONATION_SCORING_CONFIG["DEFAULT"])
 
 
 # ============================================================
@@ -1667,6 +2194,110 @@ STRUCTURE_RECOMMENDATIONS: Dict[str, Dict[str, Dict[str, str]]] = {
             ),
         },
     },
+
+    # --------------------------------------------------------
+    # Overlap PTV–OAR
+    # --------------------------------------------------------
+    "STRUCT_OVERLAP": {
+        "NO_PTV": {
+            "physicist": (
+                "No se encontró un PTV principal, por lo que no se puede evaluar el "
+                "overlap PTV–OAR."
+            ),
+            "radonc": (
+                "No se identificó un volumen PTV en la lista de estructuras; "
+                "el sistema no puede estimar el grado de invasión del blanco en los OARs."
+            ),
+        },
+        "NO_OARS": {
+            "physicist": (
+                "No se identificaron órganos de riesgo relevantes en la configuración de overlaps "
+                "(Rectum, Bladder, femorales, etc.), o ninguno pudo ser emparejado por nombre."
+            ),
+            "radonc": (
+                "El sistema no encontró estructuras de órganos de riesgo clásicas para evaluar "
+                "solapes con el PTV."
+            ),
+        },
+        "OK": {
+            "physicist": (
+                "El grado de overlap PTV–OAR se encuentra dentro de los rangos configurados para el sitio. "
+                "La invasión del PTV en los órganos de riesgo es compatible con la anatomía esperada."
+            ),
+            "radonc": (
+                "El solapamiento entre el volumen blanco y los órganos de riesgo evaluados es aceptable "
+                "según los criterios del servicio."
+            ),
+        },
+        "WARN": {
+            "physicist": (
+                "Se observaron overlaps PTV–OAR algo elevados en uno o más órganos. Puede ser clínicamente "
+                "plausible, pero conviene revisar si el contorneo del PTV y de los OARs es coherente con la "
+                "anatomía y las guías de delineación."
+            ),
+            "radonc": (
+                "Hay un grado de invasión del PTV en algunos órganos de riesgo que está por encima de lo óptimo. "
+                "Revise con el físico si los contornos son correctos o si el caso justifica ese solapamiento."
+            ),
+        },
+        "FAIL": {
+            "physicist": (
+                "Se encontraron overlaps PTV–OAR extremos (por ejemplo, una gran fracción de un femoral dentro del PTV) "
+                "que sugieren un posible error de contorneo o de nomenclatura. Es recomendable revisar los contornos "
+                "antes de aprobar el plan."
+            ),
+            "radonc": (
+                "El sistema detectó un solapamiento muy alto entre el PTV y uno o más órganos de riesgo, "
+                "lo cual podría indicar contornos incorrectos. Se recomienda discutir el caso con el físico y, "
+                "si procede, corregir los volúmenes antes de la aprobación clínica."
+            ),
+        },
+    },
+        # --------------------------------------------------------
+    # Consistencia de lateralidad
+    # --------------------------------------------------------
+    "LATERALITY": {
+        "NO_PAIRS": {
+            "physicist": (
+                "No se encontraron pares de estructuras laterales configurados (LEFT/RIGHT) "
+                "o no se pudieron emparejar por nombre."
+            ),
+            "radonc": (
+                "El sistema no identificó estructuras con lateralidad clara (izquierda/derecha) para comparar volúmenes."
+            ),
+        },
+        "OK": {
+            "physicist": (
+                "Los volúmenes de las estructuras izquierdas y derechas están en un rango de ratio razonable. "
+                "No se detectan asimetrías volumétricas llamativas que sugieran errores de contorneo o de nomenclatura."
+            ),
+            "radonc": (
+                "La relación de volúmenes entre estructuras izquierda/derecha evaluadas es coherente con lo esperado."
+            ),
+        },
+        "WARN": {
+            "physicist": (
+                "Se observan asimetrías volumétricas moderadas entre estructuras izquierdas y derechas. "
+                "Podrían ser anatómicas, pero conviene revisar el contorneo y la nomenclatura para descartar errores."
+            ),
+            "radonc": (
+                "Hay cierta asimetría de volúmenes entre estructuras izquierda/derecha. "
+                "Es recomendable revisar con el físico si los contornos son correctos."
+            ),
+        },
+        "FAIL": {
+            "physicist": (
+                "Se detectaron asimetrías volumétricas extremas entre estructuras izquierda/derecha "
+                "(ratio muy fuera del rango esperado). Esto sugiere un posible error de contorneo, "
+                "lateralidad invertida o nomenclatura equivocada."
+            ),
+            "radonc": (
+                "El sistema encontró una diferencia muy grande de volumen entre estructuras izquierda/derecha, "
+                "lo que podría indicar un error en la delimitación o en la identificación de lateralidad. "
+                "Se recomienda revisar los contornos antes de la aprobación."
+            ),
+        },
+    },
 }
 
 
@@ -1954,6 +2585,205 @@ PLAN_RECOMMENDATIONS: Dict[str, Dict[str, Dict[str, str]]] = {
         },
     },
 
+    # --------------------------------------------------------
+    # Consistencia de prescripción
+    # --------------------------------------------------------
+    "PRESCRIPTION": {
+        "NO_PLAN": {
+            "physicist": (
+                "No se pudo evaluar la prescripción porque no hay RTPLAN cargado. "
+                "Verifica que el archivo de plan esté correctamente asociado al caso."
+            ),
+            "radonc": (
+                "El sistema de QA no tiene un plan asociado, por lo que no puede revisar "
+                "la prescripción (dosis total ni fracciones). Pide al físico que cargue el plan "
+                "antes de aprobar el tratamiento."
+            ),
+        },
+        "NO_INFO": {
+            "physicist": (
+                "El plan no tiene información completa de dosis total, número de fracciones "
+                "o dosis por fracción. Revisa la prescripción en el TPS y la extracción de datos "
+                "en el pipeline de DICOM."
+            ),
+            "radonc": (
+                "El sistema de QA no puede leer de manera clara la combinación de dosis total y "
+                "número de fracciones. Confirma con el físico la prescripción exacta antes de validar el plan."
+            ),
+        },
+        "OK": {
+            "physicist": (
+                "La dosis total coincide con el producto de número de fracciones por dosis por fracción "
+                "dentro de las tolerancias configuradas. La prescripción aparente en el DVH del PTV "
+                "es consistente con la Rx del plan."
+            ),
+            "radonc": (
+                "La prescripción es internamente consistente: dosis total, número de fracciones y dosis "
+                "por fracción coinciden, y la dosis al PTV (por ejemplo, D50) concuerda con la Rx."
+            ),
+        },
+        "WARN": {
+            "physicist": (
+                "Se detectan pequeñas discrepancias entre la dosis total y el producto "
+                "número de fracciones × dosis por fracción, o entre la Rx y la dosis "
+                "observada en el DVH del PTV. Revisa la normalización del plan, boosts "
+                "u otros ajustes intencionales, y documenta la justificación si se mantiene."
+            ),
+            "radonc": (
+                "El sistema de QA detecta ligeras discrepancias entre la prescripción teórica "
+                "y la dosis que realmente recibe el PTV. Comenta con el físico si se trata de un "
+                "boost, una normalización especial o una decisión clínica deliberada."
+            ),
+        },
+        "FAIL": {
+            "physicist": (
+                "Hay una discrepancia importante en la prescripción (dosis total vs "
+                "número de fracciones × dosis por fracción, o entre Rx y DVH del PTV). "
+                "Revisa cuidadosamente que la prescripción en el TPS sea la deseada, que no haya "
+                "errores de carga, y corrige el plan si es necesario."
+            ),
+            "radonc": (
+                "El sistema de QA indica una discrepancia significativa entre la prescripción formal "
+                "y la dosis que recibe el volumen blanco. Antes de tratar, solicita al físico que "
+                "revise y, en su caso, rehaga el plan para asegurar que la Rx se cumpla correctamente."
+            ),
+        },
+    },
+
+    # --------------------------------------------------------
+    # MU totales / MU por Gy
+    # --------------------------------------------------------
+    "PLAN_MU": {
+        "NO_PLAN": {
+            "physicist": (
+                "No se pudo evaluar los MU porque no hay RTPLAN cargado."
+            ),
+            "radonc": (
+                "El sistema de QA no tiene un plan asociado, por lo que no puede revisar "
+                "los MU totales del tratamiento."
+            ),
+        },
+        "NO_INFO": {
+            "physicist": (
+                "No se pudo calcular MU por Gy porque falta información de MU o de dosis total. "
+                "Verifica que los MU de cada campo estén disponibles en el RTPLAN y que la dosis "
+                "total sea válida."
+            ),
+            "radonc": (
+                "El sistema de QA no logra estimar los MU totales por Gy de este plan. "
+                "Comenta con el físico si la información de MU está completa en el TPS "
+                "o si se trata de un plan especial (por ejemplo, QA)."
+            ),
+        },
+        "OK": {
+            "physicist": (
+                "Los MU totales y los MU por Gy se encuentran dentro del rango típico configurado "
+                "para este sitio y técnica. No se detecta nada inusual en la carga de MU."
+            ),
+            "radonc": (
+                "La cantidad total de MU es consistente con lo que se espera para este tipo "
+                "de plan y sitio anatómico. No hay indicios de subdosis ni de modulación excesiva."
+            ),
+        },
+        "LOW_MU": {
+            "physicist": (
+                "El plan tiene un valor de MU por Gy por debajo del rango esperado. "
+                "Revisa la normalización, la prescripción y si el plan corresponde a un QA plan "
+                "u otra situación especial. Verifica que la dosis en el PTV sea la clínica deseada."
+            ),
+            "radonc": (
+                "El sistema de QA señala que los MU por Gy son anormalmente bajos. "
+                "Esto podría reflejar una subdosis o un error de normalización. "
+                "Confirma con el físico que el plan entregue realmente la dosis prescrita al PTV."
+            ),
+        },
+        "HIGH_MU": {
+            "physicist": (
+                "El plan presenta MU por Gy por encima del rango típico, lo que puede indicar "
+                "una modulación excesiva o una configuración inusual del plan. Revisa la complejidad "
+                "del MLC, las restricciones de optimización y considera simplificar el plan si es posible."
+            ),
+            "radonc": (
+                "Los MU por Gy del plan son muy altos en comparación con lo habitual. "
+                "Esto puede asociarse a una modulación muy intensa. Comenta con el físico si la "
+                "complejidad del plan es necesaria o si se puede optar por una solución más sencilla."
+            ),
+        },
+        "WARN": {
+            "physicist": (
+                "Los MU por Gy están cerca de los límites del rango configurado. "
+                "No es necesariamente incorrecto, pero conviene revisar la justificación clínica "
+                "de esa carga de MU y verificar que no haya errores de normalización."
+            ),
+            "radonc": (
+                "La carga de MU del plan está en el límite de lo considerado típico. "
+                "Puede ser aceptable, pero vale la pena confirmar con el físico que el plan sea robusto "
+                "y que no existan alternativas más simples."
+            ),
+        },
+    },
+
+    # --------------------------------------------------------
+    # Complejidad / modulación del plan
+    # --------------------------------------------------------
+    "PLAN_MODULATION": {
+        "NO_PLAN": {
+            "physicist": (
+                "No se pudo evaluar la modulación del plan porque no hay RTPLAN cargado."
+            ),
+            "radonc": (
+                "El sistema de QA no tiene un plan cargado, por lo que no puede estimar "
+                "la complejidad del MLC ni de los arcos."
+            ),
+        },
+        "NO_INFO": {
+            "physicist": (
+                "No se dispone de información suficiente de control points o aperturas de MLC "
+                "para estimar la complejidad del plan. Revisa que el RTPLAN contenga la información "
+                "de control points necesaria y que el parser la esté leyendo correctamente."
+            ),
+            "radonc": (
+                "El sistema de QA no puede estimar cuán complejo es el plan (por ejemplo, número "
+                "de control points o tamaño de aperturas). Pregunta al físico si hubo algún problema "
+                "con la exportación del plan."
+            ),
+        },
+        "OK": {
+            "physicist": (
+                "El número de control points por arco y la apertura media del MLC son coherentes "
+                "con un plan de complejidad razonable para este sitio. La modulación no parece excesiva."
+            ),
+            "radonc": (
+                "La complejidad del plan (en términos de control points y aperturas de MLC) "
+                "se encuentra en un rango normal. No hay señales de sobre-modulación."
+            ),
+        },
+        "HIGH_MODULATION": {
+            "physicist": (
+                "El plan muestra un número elevado de control points y/o aperturas de MLC muy pequeñas "
+                "y muy variables, lo que sugiere una modulación alta. Revisa si esta complejidad "
+                "es clínicamente necesaria, su impacto en la robustez del plan y en el tiempo/carga de QA."
+            ),
+            "radonc": (
+                "El sistema de QA indica que el plan es altamente modulado. Esto puede aumentar "
+                "la sensibilidad a errores de posicionamiento y a inexactitudes dosimétricas. "
+                "Considera con el físico si se puede simplificar el plan sin perder calidad clínica."
+            ),
+        },
+        "WARN": {
+            "physicist": (
+                "La complejidad del plan se encuentra en el límite superior de lo esperado. "
+                "Podría ser aceptable, pero conviene revisar la calidad de la optimización, "
+                "evaluar la robustez y considerar simplificar el plan si es posible."
+            ),
+            "radonc": (
+                "El nivel de modulación del plan está cerca del límite de lo que el sistema considera típico. "
+                "Puede ser clínicamente aceptable, pero vale la pena discutir con el físico si un plan "
+                "menos complejo podría ofrecer resultados similares con mayor robustez."
+            ),
+        },
+    },
+
     # ------------------------------
     # 3) Geometría de beams/arcos
     # ------------------------------
@@ -2047,7 +2877,97 @@ PLAN_RECOMMENDATIONS: Dict[str, Dict[str, Dict[str, str]]] = {
             ),
         },
     },
+
+    # --------------------------------------------------------
+    # Patrones angulares (IMRT/3D-CRT/VMAT)
+    # --------------------------------------------------------
+    "ANGULAR_PATTERN": {
+        "NO_PLAN": {
+            "physicist": (
+                "No hay RTPLAN cargado; no se pueden evaluar los patrones angulares "
+                "de campos/arcos."
+            ),
+            "radonc": (
+                "El sistema de QA no tiene un plan asociado, por lo que no puede "
+                "revisar la distribución angular de los campos."
+            ),
+        },
+        "NO_INFO": {
+            "physicist": (
+                "No se dispone de información suficiente de beams clínicos (ángulos de gantry) "
+                "para evaluar los patrones angulares."
+            ),
+            "radonc": (
+                "El sistema de QA no pudo reconstruir los ángulos de los campos, por lo que "
+                "no puede evaluar el patrón angular del plan."
+            ),
+        },
+        "OK": {
+            "physicist": (
+                "El patrón angular de campos/arcos es consistente con la configuración "
+                "para la técnica y sitio (sin campos diametralmente opuestos en IMRT, "
+                "box correcto cuando aplica en 3D-CRT y arcos VMAT razonablemente "
+                "complementarios cuando se espera)."
+            ),
+            "radonc": (
+                "La distribución angular de los campos/arcos es coherente con el estilo de plan "
+                "esperado para este tratamiento."
+            ),
+        },
+        "IMRT_OPPOSED": {
+            "physicist": (
+                "Se detectaron pares de campos IMRT aproximadamente opuestos (≈180°). "
+                "Revisa si esto fue intencional; en muchos protocolos se evita esta "
+                "configuración para no 'lavar' gradientes y mejorar robustez."
+            ),
+            "radonc": (
+                "El sistema de QA indica que algunos campos IMRT están casi diametralmente "
+                "opuestos. Comenta con el físico si esto fue una decisión planeada o si conviene "
+                "ajustar la distribución angular."
+            ),
+        },
+        "BOX_MISMATCH": {
+            "physicist": (
+                "Para esta técnica/sitio se esperaba un box de 4 campos (por ejemplo 0°, 90°, "
+                "180°, 270°), pero los ángulos no coinciden con ese patrón dentro de la "
+                "tolerancia configurada. Verifica si el plan pretende ser un box clásico "
+                "o si se trata de una configuración diferente que requiere documentarse."
+            ),
+            "radonc": (
+                "El sistema de QA señala que los campos 3D-CRT no siguen el patrón clásico de "
+                "4 campos ortogonales. Confirma con el físico si se trata de una estrategia "
+                "planeada distinta al 'box' estándar."
+            ),
+        },
+        "VMAT_WEIRD": {
+            "physicist": (
+                "El patrón de arcos VMAT no coincide con la configuración esperada de arcos "
+                "complementarios (por ejemplo, dos arcos de cobertura similar y sentidos "
+                "opuestos). Revisa el alcance angular, el sentido de giro y si la geometría "
+                "es coherente con los protocolos del servicio."
+            ),
+            "radonc": (
+                "Los arcos VMAT del plan no se ven del todo complementarios según el sistema "
+                "de QA (cobertura angular o configuración de arcos atípica). Comenta con el "
+                "físico si esta geometría es intencional."
+            ),
+        },
+        "WARN": {
+            "physicist": (
+                "El patrón angular cumple parcialmente con las reglas configuradas, pero presenta "
+                "algunas desviaciones menores (por ejemplo, box algo desalineado o arcos VMAT "
+                "ligeramente asimétricos). Merece una revisión clínica, aunque no implica fallo "
+                "automático."
+            ),
+            "radonc": (
+                "La distribución angular de los campos/arcos está cerca del patrón esperado, pero "
+                "con algunas variaciones. Puede ser aceptable, pero conviene revisarlo junto con "
+                "el físico."
+            ),
+        },
+    },
 }
+
 
 
 def get_plan_recommendations(check_key: str, scenario: str) -> Dict[str, str]:
@@ -2289,6 +3209,163 @@ DOSE_RECOMMENDATIONS: Dict[str, Dict[str, Dict[str, str]]] = {
                 "Los órganos de riesgo principales cumplen las restricciones de dosis definidas. "
                 "Puedes centrarte en aspectos clínicos adicionales (margen de PTV, anatomía del paciente, "
                 "tratamientos previos) para la decisión final."
+            ),
+        },
+    },
+
+        # --------------------------------------------------------
+    # Homogeneidad del PTV
+    # --------------------------------------------------------
+    "PTV_HOMOGENEITY": {
+        "NO_DOSE": {
+            "physicist": (
+                "No se encontró matriz de dosis en el Case; no se pueden calcular "
+                "índices de homogeneidad del PTV."
+            ),
+            "radonc": (
+                "El sistema de QA no tiene una distribución de dosis asociada, por lo que "
+                "no puede evaluar la homogeneidad del volumen blanco."
+            ),
+        },
+        "NO_PTV": {
+            "physicist": (
+                "No se encontró un PTV principal (ninguna estructura con 'PTV'). "
+                "No se pueden calcular HI_RTOG ni (D2−D98)/D50."
+            ),
+            "radonc": (
+                "No se identificó un volumen objetivo marcado como PTV en la lista de estructuras, "
+                "por lo que no se puede evaluar la homogeneidad del plan."
+            ),
+        },
+        "EMPTY_PTV_MASK": {
+            "physicist": (
+                "El PTV tiene máscara vacía (sin voxeles válidos) en el grid de dosis. "
+                "Revisar la asociación CT–RTSTRUCT–RTDOSE."
+            ),
+            "radonc": (
+                "El sistema de QA indica que el volumen PTV no tiene voxeles válidos en la "
+                "distribución de dosis. Podría tratarse de un problema de registro o de exportación."
+            ),
+        },
+        "NO_INFO": {
+            "physicist": (
+                "No se dispone de información fiable de prescripción o de D50 en el PTV; "
+                "no se pueden evaluar los índices de homogeneidad de forma robusta."
+            ),
+            "radonc": (
+                "No se dispone de información suficiente de dosis/prescripción para evaluar la "
+                "homogeneidad del volumen blanco."
+            ),
+        },
+        "OK": {
+            "physicist": (
+                "Los índices de homogeneidad del PTV están dentro del rango configurado "
+                "(HI_RTOG y (D2−D98)/D50). La distribución de dosis en el PTV es razonablemente uniforme."
+            ),
+            "radonc": (
+                "La homogeneidad de la dosis dentro del PTV es adecuada según los criterios del servicio."
+            ),
+        },
+        "WARN": {
+            "physicist": (
+                "Los índices de homogeneidad del PTV están ligeramente fuera del rango óptimo. "
+                "Puede ser aceptable según el contexto clínico, pero conviene revisar la distribución "
+                "de dosis (regiones frías y calientes dentro del PTV)."
+            ),
+            "radonc": (
+                "La homogeneidad del PTV está algo por debajo de lo ideal, pero dentro de un rango "
+                "posiblemente aceptable. Revíselo con el físico para confirmar si se justifica por "
+                "la anatomía o la planificación."
+            ),
+        },
+        "FAIL": {
+            "physicist": (
+                "Los índices de homogeneidad del PTV están claramente fuera del rango esperado "
+                "(HI_RTOG o (D2−D98)/D50 demasiado altos). Es recomendable revisar la técnica de "
+                "planificación, la normalización y la presencia de hotspots o coldspots marcados "
+                "dentro del PTV."
+            ),
+            "radonc": (
+                "La distribución de dosis dentro del PTV es poco homogénea según los criterios del sistema. "
+                "Se recomienda analizar el plan junto con el físico para valorar ajustes antes de la aprobación."
+            ),
+        },
+    },
+
+    # --------------------------------------------------------
+    # Conformidad del PTV (CI de Paddick)
+    # --------------------------------------------------------
+    "PTV_CONFORMITY": {
+        "NO_DOSE": {
+            "physicist": (
+                "No se encontró matriz de dosis en el Case; no se puede calcular el "
+                "índice de conformidad de Paddick."
+            ),
+            "radonc": (
+                "El sistema de QA no tiene una distribución de dosis asociada, por lo que no puede "
+                "evaluar qué tan bien se ajusta la isodosis de prescripción al volumen objetivo."
+            ),
+        },
+        "NO_PTV": {
+            "physicist": (
+                "No se encontró un PTV principal; no se puede calcular el CI (Paddick)."
+            ),
+            "radonc": (
+                "No se identificó un volumen objetivo PTV, por lo que no se puede evaluar la conformidad "
+                "de la isodosis de prescripción."
+            ),
+        },
+        "EMPTY_PTV_MASK": {
+            "physicist": (
+                "El PTV tiene máscara vacía en el grid de dosis; no se puede evaluar la conformidad. "
+                "Revisar la exportación y el registro."
+            ),
+            "radonc": (
+                "El sistema de QA indica que el PTV no tiene voxeles válidos en la distribución de dosis. "
+                "Esto puede deberse a un problema de registro o de exportación del plan."
+            ),
+        },
+        "NO_INFO": {
+            "physicist": (
+                "No se dispone de información confiable de prescripción o de la isodosis de referencia; "
+                "no se puede evaluar el CI de Paddick."
+            ),
+            "radonc": (
+                "No se cuenta con una dosis de prescripción clara o con una isodosis de referencia, "
+                "por lo que el sistema no puede cuantificar la conformidad del plan."
+            ),
+        },
+        "OK": {
+            "physicist": (
+                "El índice de conformidad de Paddick está en el rango esperado para este sitio y técnica. "
+                "La isodosis de prescripción se ajusta de forma razonablemente precisa al PTV con poco "
+                "irradiación innecesaria de tejido sano."
+            ),
+            "radonc": (
+                "La conformidad entre el volumen objetivo y la isodosis de prescripción es buena según los "
+                "criterios del servicio."
+            ),
+        },
+        "WARN": {
+            "physicist": (
+                "El índice de conformidad de Paddick es algo inferior al rango óptimo. Puede ser aceptable, "
+                "pero conviene revisar si hay exceso de volumen sano dentro de la isodosis o si la cobertura "
+                "del PTV se está sacrificando."
+            ),
+            "radonc": (
+                "La conformidad del plan es moderada; podría haber algo de irradiación innecesaria de tejido sano "
+                "o cierta falta de ajuste a la forma del PTV. Revíselo con el físico según el contexto clínico."
+            ),
+        },
+        "FAIL": {
+            "physicist": (
+                "El índice de conformidad de Paddick es claramente bajo. La isodosis de prescripción no se ajusta "
+                "bien al PTV (sobredosis innecesaria a tejido sano o mala cobertura del objetivo). Se recomienda "
+                "replantear el plan antes de la aprobación clínica."
+            ),
+            "radonc": (
+                "La conformidad entre la isodosis de prescripción y el volumen objetivo es pobre. "
+                "Se recomienda revisar el plan junto con el físico y considerar una nueva optimización."
             ),
         },
     },

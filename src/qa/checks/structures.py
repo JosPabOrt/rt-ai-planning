@@ -18,6 +18,8 @@ from qa.config import (
     get_mandatory_struct_scoring_for_site,
     get_ptv_inside_body_config_for_site,
     get_duplicate_struct_config_for_site,
+    get_struct_overlap_config_for_site,
+    get_laterality_config_for_site,
     get_structure_recommendations,
     format_recommendations_text,
 )
@@ -39,6 +41,20 @@ def _match_structs_by_patterns(struct_names: List[str], patterns: List[str]) -> 
         if any(p in n_up for p in pat_up):
             matches.append(name)
     return matches
+
+
+def _find_largest_struct_by_patterns(case: Case, patterns: List[str]) -> StructureInfo | None:
+    """
+    Devuelve la estructura de mayor volumen cuyo nombre matchee alguno de los patrones.
+    """
+    struct_names = list(case.structs.keys())
+    matches = _match_structs_by_patterns(struct_names, patterns)
+    if not matches:
+        return None
+
+    candidates: List[StructureInfo] = [case.structs[n] for n in matches]
+    candidates.sort(key=lambda s: s.volume_cc, reverse=True)
+    return candidates[0]
 
 
 def _find_ptv_struct(case: Case) -> StructureInfo | None:
@@ -364,7 +380,211 @@ def check_ptv_inside_body(case: Case) -> CheckResult:
 
 
 # =====================================================
-# 4) Estructuras duplicadas (naming robusto)
+# 4) Overlap PTV–OAR
+# =====================================================
+
+def check_ptv_oar_overlap(case: Case) -> CheckResult:
+    """
+    Evalúa el grado de solapamiento PTV–OAR para los OARs configurados.
+
+    Para cada OAR:
+      - overlap_cc = vol(PTV ∩ OAR)
+      - overlap_frac_OAR = overlap_cc / vol(OAR)
+      - overlap_frac_PTV = overlap_cc / vol(PTV)
+
+    Estados:
+      - OK: solapes en rango esperado.
+      - WARN: overlaps altos pero plausibles.
+      - FAIL: overlaps extremos → posible error de contorneo.
+    """
+    ptv = _find_ptv_struct(case)
+    if ptv is None:
+        rec_texts = get_structure_recommendations("STRUCT_OVERLAP", "NO_PTV")
+        rec = format_recommendations_text(rec_texts)
+        return CheckResult(
+            name="PTV–OAR overlap",
+            passed=False,
+            score=0.3,
+            message="No se encontró un PTV principal; no se puede evaluar overlap PTV–OAR.",
+            details={},
+            group="Structures",
+            recommendation=rec,
+        )
+
+    struct_names = list(case.structs.keys())
+    site = infer_site_from_structs(struct_names)
+    cfg = get_struct_overlap_config_for_site(site)
+
+    oar_cfgs: Dict[str, Any] = cfg.get("oars", {})
+    score_ok = float(cfg.get("score_ok", 1.0))
+    score_warn = float(cfg.get("score_warn", 0.7))
+    score_fail = float(cfg.get("score_fail", 0.3))
+    score_no_info = float(cfg.get("score_no_info", 0.8))
+
+    if not oar_cfgs:
+        rec_texts = get_structure_recommendations("STRUCT_OVERLAP", "NO_OARS")
+        rec = format_recommendations_text(rec_texts)
+        return CheckResult(
+            name="PTV–OAR overlap",
+            passed=True,
+            score=score_no_info,
+            message="No hay OARs configurados para evaluar overlap PTV–OAR.",
+            details={
+                "site_inferred": site,
+                "config_used": cfg,
+            },
+            group="Structures",
+            recommendation=rec,
+        )
+
+    ptv_mask = ptv.mask.astype(bool)
+    ptv_vox = int(ptv_mask.sum())
+    if ptv_vox == 0:
+        rec_texts = get_structure_recommendations("STRUCT_OVERLAP", "NO_PTV")
+        rec = format_recommendations_text(rec_texts)
+        return CheckResult(
+            name="PTV–OAR overlap",
+            passed=False,
+            score=0.3,
+            message=f"PTV '{ptv.name}' sin voxeles válidos; no se puede evaluar overlap.",
+            details={},
+            group="Structures",
+            recommendation=rec,
+        )
+
+    # Estimación de volumen por voxel (cc/voxel) usando el PTV
+    voxel_vol_cc = ptv.volume_cc / ptv_vox if ptv_vox > 0 else 0.0
+
+    # Severidad global (OK, WARN, FAIL)
+    order = ["OK", "WARN", "FAIL"]
+
+    def worsen(curr: str, new_: str) -> str:
+        return order[max(order.index(curr), order.index(new_))]
+
+    global_severity = "OK"
+    issues: List[str] = []
+    metrics: Dict[str, Any] = {}
+    num_oars_eval = 0
+
+    for oar_id, oar_conf in oar_cfgs.items():
+        patterns = oar_conf.get("patterns", [])
+        oar_struct = _find_largest_struct_by_patterns(case, patterns)
+        if oar_struct is None:
+            continue
+
+        oar_mask = oar_struct.mask.astype(bool)
+        oar_vox = int(oar_mask.sum())
+        if oar_vox == 0:
+            continue
+
+        overlap_mask = ptv_mask & oar_mask
+        overlap_vox = int(overlap_mask.sum())
+        if overlap_vox == 0:
+            # Sin solapamiento → nada que reportar (esto es bueno)
+            metrics[oar_struct.name] = {
+                "overlap_cc": 0.0,
+                "overlap_frac_OAR": 0.0,
+                "overlap_frac_PTV": 0.0,
+            }
+            num_oars_eval += 1
+            continue
+
+        overlap_cc = overlap_vox * voxel_vol_cc if voxel_vol_cc > 0 else 0.0
+        frac_oar = overlap_vox / oar_vox
+        frac_ptv = overlap_vox / ptv_vox
+
+        metrics[oar_struct.name] = {
+            "overlap_cc": overlap_cc,
+            "overlap_frac_OAR": frac_oar,
+            "overlap_frac_PTV": frac_ptv,
+        }
+        num_oars_eval += 1
+
+        max_frac_oar_ok = float(oar_conf.get("max_frac_oar_ok", 0.3))
+        max_frac_oar_warn = float(oar_conf.get("max_frac_oar_warn", 0.5))
+        max_frac_ptv_ok = float(oar_conf.get("max_frac_ptv_ok", 0.3))
+        max_frac_ptv_warn = float(oar_conf.get("max_frac_ptv_warn", 0.5))
+
+        # Determinar severidad para este OAR
+        local_severity = "OK"
+        if (frac_oar <= max_frac_oar_ok) and (frac_ptv <= max_frac_ptv_ok):
+            local_severity = "OK"
+        elif (frac_oar <= max_frac_oar_warn) and (frac_ptv <= max_frac_ptv_warn):
+            local_severity = "WARN"
+            issues.append(
+                f"{oar_struct.name}: overlap≈{overlap_cc:.1f} cc "
+                f"({frac_oar*100:.1f}% del OAR, {frac_ptv*100:.1f}% del PTV) → WARN."
+            )
+        else:
+            local_severity = "FAIL"
+            issues.append(
+                f"{oar_struct.name}: overlap≈{overlap_cc:.1f} cc "
+                f"({frac_oar*100:.1f}% del OAR, {frac_ptv*100:.1f}% del PTV) → FAIL."
+            )
+
+        global_severity = worsen(global_severity, local_severity)
+
+    if num_oars_eval == 0:
+        rec_texts = get_structure_recommendations("STRUCT_OVERLAP", "NO_OARS")
+        rec = format_recommendations_text(rec_texts)
+        return CheckResult(
+            name="PTV–OAR overlap",
+            passed=True,
+            score=score_no_info,
+            message="No se pudieron evaluar overlaps PTV–OAR (no se encontraron OARs configurados presentes).",
+            details={
+                "site_inferred": site,
+                "ptv_name": ptv.name,
+                "metrics": metrics,
+                "config_used": cfg,
+            },
+            group="Structures",
+            recommendation=rec,
+        )
+
+    if global_severity == "OK":
+        scenario = "OK"
+        passed = True
+        score = score_ok
+        msg = "Grado de overlap PTV–OAR dentro de rangos esperados."
+    elif global_severity == "WARN":
+        scenario = "WARN"
+        passed = True
+        score = score_warn
+        msg = "Se detectaron overlaps PTV–OAR algo elevados en uno o más órganos."
+        if issues:
+            msg += " " + " | ".join(issues)
+    else:
+        scenario = "FAIL"
+        passed = False
+        score = score_fail
+        msg = "Se detectaron overlaps PTV–OAR extremos en uno o más órganos."
+        if issues:
+            msg += " " + " | ".join(issues)
+
+    rec_texts = get_structure_recommendations("STRUCT_OVERLAP", scenario)
+    rec = format_recommendations_text(rec_texts)
+
+    return CheckResult(
+        name="PTV–OAR overlap",
+        passed=passed,
+        score=score,
+        message=msg,
+        details={
+            "site_inferred": site,
+            "ptv_name": ptv.name,
+            "metrics": metrics,
+            "issues": issues,
+            "severity": global_severity,
+            "config_used": cfg,
+        },
+        group="Structures",
+        recommendation=rec,
+    )
+
+
+# =====================================================
+# 5) Estructuras duplicadas (naming robusto)
 # =====================================================
 
 def check_duplicate_structures(case: Case) -> CheckResult:
@@ -471,10 +691,209 @@ def check_duplicate_structures(case: Case) -> CheckResult:
 
 
 # =====================================================
-# 5) Punto de entrada de este módulo
+# 6) Consistencia de lateralidad (LEFT vs RIGHT)
 # =====================================================
 
-def run_structural_checks(case: Case) -> List[CheckResult]:
+def check_laterality_consistency(case: Case) -> CheckResult:
+    """
+    Evalúa la consistencia de lateralidad para pares de estructuras L/R.
+
+    Para cada par configurado:
+      - Se identifica una estructura LEFT y RIGHT por patrones.
+      - Se calcula el ratio de volumen V_L / V_R.
+      - Se compara contra rangos:
+            [ratio_ok_min, ratio_ok_max]  → OK
+            [ratio_warn_min, ratio_warn_max] (extendido) → WARN
+            fuera de ese rango → FAIL
+    """
+    struct_names = list(case.structs.keys())
+    if not struct_names:
+        rec_texts = get_structure_recommendations("LATERALITY", "NO_PAIRS")
+        rec = format_recommendations_text(rec_texts)
+        return CheckResult(
+            name="Laterality consistency",
+            passed=True,
+            score=0.9,
+            message="No hay estructuras en el caso; no se evalúa lateralidad.",
+            details={},
+            group="Structures",
+            recommendation=rec,
+        )
+
+    site = infer_site_from_structs(struct_names)
+    cfg = get_laterality_config_for_site(site)
+
+    pairs_cfg = cfg.get("pairs", [])
+    score_ok = float(cfg.get("score_ok", 1.0))
+    score_warn = float(cfg.get("score_warn", 0.7))
+    score_fail = float(cfg.get("score_fail", 0.3))
+    score_no_info = float(cfg.get("score_no_info", 0.9))
+
+    if not pairs_cfg:
+        rec_texts = get_structure_recommendations("LATERALITY", "NO_PAIRS")
+        rec = format_recommendations_text(rec_texts)
+        return CheckResult(
+            name="Laterality consistency",
+            passed=True,
+            score=score_no_info,
+            message="No hay pares de estructuras configurados para evaluar lateralidad.",
+            details={
+                "site_inferred": site,
+                "config_used": cfg,
+            },
+            group="Structures",
+            recommendation=rec,
+        )
+
+    order = ["OK", "WARN", "FAIL"]
+
+    def worsen(curr: str, new_: str) -> str:
+        return order[max(order.index(curr), order.index(new_))]
+
+    global_severity = "OK"
+    pair_metrics: List[Dict[str, Any]] = []
+    issues: List[str] = []
+    num_pairs_evaluated = 0
+
+    for pair in pairs_cfg:
+        label = pair.get("label", "Pair")
+        left_patterns = pair.get("left_patterns", [])
+        right_patterns = pair.get("right_patterns", [])
+
+        left_struct = _find_largest_struct_by_patterns(case, left_patterns)
+        right_struct = _find_largest_struct_by_patterns(case, right_patterns)
+
+        if left_struct is None or right_struct is None:
+            # Si falta uno de los lados, no evaluamos este par, pero lo registramos
+            pair_metrics.append(
+                {
+                    "label": label,
+                    "left_name": left_struct.name if left_struct else None,
+                    "right_name": right_struct.name if right_struct else None,
+                    "status": "MISSING_SIDE",
+                }
+            )
+            continue
+
+        vL = float(left_struct.volume_cc)
+        vR = float(right_struct.volume_cc)
+
+        # Evitar división por cero
+        if vR <= 0 or vL <= 0:
+            pair_metrics.append(
+                {
+                    "label": label,
+                    "left_name": left_struct.name,
+                    "right_name": right_struct.name,
+                    "vL_cc": vL,
+                    "vR_cc": vR,
+                    "status": "ZERO_VOLUME",
+                }
+            )
+            continue
+
+        ratio = vL / vR
+
+        ratio_ok_min = float(pair.get("ratio_ok_min", 0.5))
+        ratio_ok_max = float(pair.get("ratio_ok_max", 2.0))
+        ratio_warn_min = float(pair.get("ratio_warn_min", 0.3))
+        ratio_warn_max = float(pair.get("ratio_warn_max", 3.0))
+
+        local_severity = "OK"
+        if ratio_ok_min <= ratio <= ratio_ok_max:
+            local_severity = "OK"
+        elif ratio_warn_min <= ratio <= ratio_warn_max:
+            local_severity = "WARN"
+            issues.append(
+                f"{label}: V_L/V_R≈{ratio:.2f} (L={vL:.1f} cc, R={vR:.1f} cc) → WARN."
+            )
+        else:
+            local_severity = "FAIL"
+            issues.append(
+                f"{label}: V_L/V_R≈{ratio:.2f} (L={vL:.1f} cc, R={vR:.1f} cc) → FAIL."
+            )
+
+        global_severity = worsen(global_severity, local_severity)
+        num_pairs_evaluated += 1
+
+        pair_metrics.append(
+            {
+                "label": label,
+                "left_name": left_struct.name,
+                "right_name": right_struct.name,
+                "vL_cc": vL,
+                "vR_cc": vR,
+                "ratio_L_over_R": ratio,
+                "severity": local_severity,
+                "ratio_ok_min": ratio_ok_min,
+                "ratio_ok_max": ratio_ok_max,
+                "ratio_warn_min": ratio_warn_min,
+                "ratio_warn_max": ratio_warn_max,
+            }
+        )
+
+    if num_pairs_evaluated == 0:
+        rec_texts = get_structure_recommendations("LATERALITY", "NO_PAIRS")
+        rec = format_recommendations_text(rec_texts)
+        return CheckResult(
+            name="Laterality consistency",
+            passed=True,
+            score=score_no_info,
+            message="No se pudieron evaluar pares de lateralidad (faltan lados o volúmenes válidos).",
+            details={
+                "site_inferred": site,
+                "pair_metrics": pair_metrics,
+                "config_used": cfg,
+            },
+            group="Structures",
+            recommendation=rec,
+        )
+
+    if global_severity == "OK":
+        scenario = "OK"
+        passed = True
+        score = score_ok
+        msg = "Consistencia de lateralidad (volúmenes L/R) dentro de rangos esperados."
+    elif global_severity == "WARN":
+        scenario = "WARN"
+        passed = True
+        score = score_warn
+        msg = "Se detectan asimetrías moderadas en algunos pares izquierda/derecha."
+        if issues:
+            msg += " " + " | ".join(issues)
+    else:
+        scenario = "FAIL"
+        passed = False
+        score = score_fail
+        msg = "Se detectan asimetrías volumétricas extremas en uno o más pares izquierda/derecha."
+        if issues:
+            msg += " " + " | ".join(issues)
+
+    rec_texts = get_structure_recommendations("LATERALITY", scenario)
+    rec = format_recommendations_text(rec_texts)
+
+    return CheckResult(
+        name="Laterality consistency",
+        passed=passed,
+        score=score,
+        message=msg,
+        details={
+            "site_inferred": site,
+            "pair_metrics": pair_metrics,
+            "issues": issues,
+            "severity": global_severity,
+            "config_used": cfg,
+        },
+        group="Structures",
+        recommendation=rec,
+    )
+
+
+# =====================================================
+# 7) Punto de entrada de este módulo
+# =====================================================
+
+def run_structures_checks(case: Case) -> List[CheckResult]:
     """
     Ejecuta todos los checks relacionados con estructuras (RTSTRUCT).
     """
@@ -483,6 +902,8 @@ def run_structural_checks(case: Case) -> List[CheckResult]:
     results.append(check_mandatory_structures(case))
     results.append(check_ptv_volume(case))
     results.append(check_ptv_inside_body(case))
+    results.append(check_ptv_oar_overlap(case))
     results.append(check_duplicate_structures(case))
+    results.append(check_laterality_consistency(case))
 
     return results

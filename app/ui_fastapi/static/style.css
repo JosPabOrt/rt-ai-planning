@@ -291,13 +291,15 @@ table.qa-table thead {
     background: #e5e7eb;
 }
 
-/* Bordes en toda la rejilla (vertical + horizontal) */
+/* Bordes en toda la rejilla + textos centrados */
 table.qa-table th,
 table.qa-table td {
     padding: 6px 8px;
     border: 1px solid #cbd5e1;
-    vertical-align: top;
+    text-align: center;      /* ⬅️ centra horizontalmente */
+    vertical-align: middle;  /* ⬅️ centra verticalmente */
 }
+
 
 /* Anchos relativos de cada columna */
 table.qa-table th.col-check,
@@ -320,15 +322,11 @@ table.qa-table td.col-reco   { width: 30%; }
     font-weight: 600;
 }
 
-.cell-status,
-.cell-score {
-    text-align: center;
-}
-
 /* Mensajes y recomendaciones */
 .cell-message,
 .cell-reco {
     line-height: 1.35;
+    text-align: center;
 }
 
 .msg-line + .msg-line,
