@@ -1647,6 +1647,9 @@ AGGREGATE_SCORING_CONFIG: Dict[str, Dict[str, Any]] = {
             "PTV volume": 1.0,
             "PTV inside BODY": 1.5,
             "Duplicate structures": 0.5,
+            "PTV–OAR overlap": 0.5,
+            "DLaterality consistency": 0.5,
+
 
             # ---- Plan ----
             "Isocenter vs PTV": 1.0,
@@ -1656,12 +1659,15 @@ AGGREGATE_SCORING_CONFIG: Dict[str, Dict[str, Any]] = {
             "Prescription consistency": 1.0,
             "Plan MU sanity": 0.8,
             "Plan modulation complexity": 0.8,
+            "Angular pattern": 1.0,
 
             # ---- Dose ----
             "Dose loaded": 1.0,
             "PTV coverage (D95)": 1.5,
             "Global hotspots": 1.2,
             "OAR DVH (basic)": 1.5,
+            "PTV conformity (Paddick)": 1.0,
+            "PTV homogeneity": 1.0,
         },
         # Peso por defecto si un check no está listado arriba
         "default_weight": 1.0,
