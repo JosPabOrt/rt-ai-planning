@@ -118,7 +118,7 @@
       "description": "Consistencia entre dosis total, fracciones y DVH del PTV."
     },
     "Dose.DOSE_LOADED": {
-      "enabled": false,
+      "enabled": true,
       "weight": 1,
       "description": "RTDOSE presente y alineado con el CT."
     },

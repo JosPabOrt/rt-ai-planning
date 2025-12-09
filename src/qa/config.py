@@ -2,7 +2,7 @@ from __future__ import annotations
 from typing import Any, Dict, List, TypedDict, Callable
 from typing import Optional  # si no lo tienes ya
 
-from qa.config_overrides import (
+from .config_overrides import (
     load_overrides,
     save_overrides,              # por si lo quieres usar luego desde aquí
     apply_overrides_to_configs,
@@ -3951,19 +3951,20 @@ def build_ui_config(
       - perfil de máquina (inferido)
       - SITE_PROFILE para el sitio
       - configuración agregada de scoring
-      - config de reporting (ya con perfil aplicado)
+      - config de reporting
       - resultado de validate_config()
-
-    Esta función está pensada para que el front sólo consuma un endpoint
-    tipo /config/ui y tenga todo lo necesario para renderizar sliders,
-    toggles, etc.
     """
     clinic_profile = get_clinic_profile(clinic_id)
     machine_profile = infer_machine_profile(machine_name)
 
     # Sitio efectivo: si no lo pasan, usamos el del profile/máquina
-    effective_site = (site or clinic_profile.get("default_site") or
-                      machine_profile.get("default_site") or "DEFAULT")
+    effective_site = (
+        site
+        or clinic_profile.get("default_site")
+        or machine_profile.get("default_site")
+        or "DEFAULT"
+    )
+
     site_profile = get_site_profile(effective_site)
     aggregate_scoring = get_aggregate_scoring_config(effective_site)
     reporting_cfg = get_reporting_config()
@@ -3972,7 +3973,7 @@ def build_ui_config(
     sections_meta = build_ui_sections_metadata()
     checks_meta = build_ui_checks_metadata()
 
-    # Opcionalmente, podemos marcar enabled según perfil de clínica
+    # Opcional: marcar enabled según perfil de clínica
     enabled_sections = set(clinic_profile.get("enabled_sections", []))
     if enabled_sections:
         for s in sections_meta:
@@ -3997,6 +3998,7 @@ def build_ui_config(
         "available_getters": list_getters(),
         "recommendation_roles": RECOMMENDATION_ROLE_CONFIG,
     }
+
 
 
 # ============================================================

@@ -25,6 +25,12 @@
             <a href="/settings" class="nav-tab {% if active_tab == 'settings' %}nav-tab-active{% endif %}">Settings</a>
         </nav>
 
+        {% if request.query_params.get('message') %}
+            <div class="alert alert-success">
+                {{ request.query_params.get('message') }}
+            </div>
+        {% endif %}
+
         <form method="post" action="/run" class="run-form">
             <div class="form-row">
                 <label for="data_root">Data root</label>
@@ -38,6 +44,23 @@
             </div>
             <button type="submit" class="btn-primary">Run QA</button>
         </form>
+
+        <!-- Barra de progreso -->
+        <div id="progress-container" class="progress-container hidden">
+            <div class="progress-header">
+                <h3>🔄 Ejecutando QA...</h3>
+                <div id="progress-message">Iniciando análisis...</div>
+            </div>
+            <div class="progress-bar-container">
+                <div class="progress-bar">
+                    <div id="progress-fill" class="progress-fill" style="width: 0%"></div>
+                </div>
+                <div id="progress-percent" class="progress-percent">0%</div>
+            </div>
+            <div class="progress-details">
+                <div id="progress-step">Paso 1/5: Cargando archivos...</div>
+            </div>
+        </div>
     </header>
 
     {% if error %}
@@ -415,7 +438,71 @@ document.addEventListener("DOMContentLoaded", () => {
 </script>
 
 
+<script>
+    // Conectar al WebSocket para recibir actualizaciones de progreso
+    const progressContainer = document.getElementById('progress-container');
+    const progressFill = document.getElementById('progress-fill');
+    const progressPercent = document.getElementById('progress-percent');
+    const progressMessage = document.getElementById('progress-message');
+    const progressStep = document.getElementById('progress-step');
 
+    let ws;
+
+    function connectWebSocket() {
+        // Usar wss:// si la página es https, sino ws://
+        const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        const wsUrl = `${protocol}//${window.location.host}/ws/progress`;
+        ws = new WebSocket(wsUrl);
+
+        ws.onmessage = function(event) {
+            const data = JSON.parse(event.data);
+            if (data.type === 'progress') {
+                updateProgress(data.message, data.progress);
+            }
+        };
+
+        ws.onopen = function() {
+            console.log('WebSocket conectado para progreso');
+        };
+
+        ws.onclose = function() {
+            console.log('WebSocket desconectado');
+            // Reconectar después de 2 segundos
+            setTimeout(connectWebSocket, 2000);
+        };
+
+        ws.onerror = function(error) {
+            console.error('WebSocket error:', error);
+        };
+    }
+
+    function updateProgress(message, percent) {
+        progressFill.style.width = `${percent}%`;
+        progressPercent.textContent = `${percent}%`;
+        progressMessage.textContent = message;
+        progressStep.textContent = `Progreso: ${percent}%`;
+
+        if (percent === 100) {
+            // Ocultar la barra de progreso después de 1 segundo
+            setTimeout(() => {
+                progressContainer.classList.add('hidden');
+            }, 1000);
+        }
+    }
+
+    // Mostrar la barra de progreso al enviar el formulario
+    const form = document.querySelector('form[action="/run"]');
+    if (form) {
+        form.addEventListener('submit', function() {
+            progressContainer.classList.remove('hidden');
+            updateProgress('Iniciando QA...', 0);
+            connectWebSocket();
+        });
+    }
+
+    // Conectar al cargar la página por si hay un QA en progreso (por ejemplo, recarga de página)
+    connectWebSocket();
+</script>
 
 </body>
 </html>

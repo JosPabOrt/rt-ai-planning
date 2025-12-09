@@ -102,6 +102,24 @@
         </button>
       </div>
 
+    <!-- Después del botón "Guardar cambios" en la sección de configuración por sección -->
+    <div class="note-box">
+        <strong>Nota:</strong> Al guardar los cambios, se recomienda volver a ejecutar el QA 
+        para ver los cambios reflejados en los resultados. Serás redirigido automáticamente 
+        al panel principal.
+    </div>
+
+    <style>
+        .note-box {
+        background-color: #f0f8ff;
+        border-left: 4px solid #3498db;
+        padding: 12px;
+        margin-top: 20px;
+        border-radius: 4px;
+        font-size: 0.95em;
+        }
+    </style>
+
       <!-- Pills de secciones -->
       <div class="section-pills">
         {% for sec in ui_config.sections %}
@@ -264,112 +282,264 @@
   })();
 </script>
 
-<!-- ================== JS SETTINGS ================== -->
 <script>
-document.addEventListener("DOMContentLoaded", function () {
-  const root = document.getElementById("settings-root");
-  const saveBtn = document.getElementById("btn-save-overrides");
-
-  // --- Navegación por sección (pills) ---
-  const pills = document.querySelectorAll(".section-pill");
-  const sectionCards = document.querySelectorAll(".section-card");
-
-  pills.forEach(pill => {
-    pill.addEventListener("click", () => {
-      const secId = pill.dataset.section;
-
-      pills.forEach(p => p.classList.remove("active"));
-      pill.classList.add("active");
-
-      sectionCards.forEach(card => {
-        if (card.dataset.section === secId) {
-          card.classList.remove("hidden");
-        } else {
-          card.classList.add("hidden");
+// ==================== BARRA DE PROGRESO MEJORADA ====================
+document.addEventListener('DOMContentLoaded', function() {
+    const progressContainer = document.getElementById('progress-container');
+    const progressFill = document.getElementById('progress-fill');
+    const progressPercent = document.getElementById('progress-percent');
+    const progressMessage = document.getElementById('progress-message');
+    const progressStep = document.getElementById('progress-step');
+    const runForm = document.querySelector('form[action="/run"]');
+    
+    // Estados del progreso del QA
+    const qaStages = {
+        validating: { min: 0, max: 10, message: "Validando rutas de archivos..." },
+        loadingDicom: { min: 10, max: 70, message: "Cargando archivos DICOM (esto puede tomar 15-20 segundos)..." },
+        processingCT: { min: 70, max: 80, message: "Procesando CT..." },
+        processingStructures: { min: 80, max: 85, message: "Analizando estructuras..." },
+        processingPlan: { min: 85, max: 90, message: "Analizando plan..." },
+        processingDose: { min: 90, max: 95, message: "Calculando dosis..." },
+        finalizing: { min: 95, max: 100, message: "Finalizando..." }
+    };
+    
+    let currentStage = 'validating';
+    let currentProgress = 0;
+    let progressInterval;
+    let stageStartTime;
+    let estimatedStageDurations = {
+        validating: 1000, // 1 segundo
+        loadingDicom: 20000, // 20 segundos (estimado)
+        processingCT: 1000,
+        processingStructures: 1000,
+        processingPlan: 1000,
+        processingDose: 1000,
+        finalizing: 500
+    };
+    
+    function updateProgress() {
+        const stage = qaStages[currentStage];
+        const now = Date.now();
+        const elapsed = now - stageStartTime;
+        const estimatedDuration = estimatedStageDurations[currentStage] || 5000;
+        
+        // Calcular progreso dentro de esta etapa
+        let stageProgress = Math.min(elapsed / estimatedDuration, 1);
+        currentProgress = stage.min + (stage.max - stage.min) * stageProgress;
+        
+        // Actualizar UI
+        progressFill.style.width = `${currentProgress}%`;
+        progressPercent.textContent = `${Math.round(currentProgress)}%`;
+        progressMessage.textContent = stage.message;
+        progressStep.textContent = `Etapa: ${currentStage.replace(/([A-Z])/g, ' $1').trim()}`;
+        
+        // Si terminamos esta etapa, pasar a la siguiente
+        if (stageProgress >= 1) {
+            const stages = Object.keys(qaStages);
+            const currentIndex = stages.indexOf(currentStage);
+            if (currentIndex < stages.length - 1) {
+                currentStage = stages[currentIndex + 1];
+                stageStartTime = Date.now();
+            } else {
+                // Última etapa - mantener en 100%
+                progressMessage.textContent = "✅ QA completado, cargando resultados...";
+            }
         }
-      });
-    });
-  });
-
-  // --- Recolectar overrides desde la UI ---
-  function collectOverrides() {
-    const sections = {};
-    const checks = {};
-
-    // Secciones
-    sectionCards.forEach(card => {
-      const secId = card.dataset.section;
-      const enabledInput = card.querySelector(".section-enabled");
-      const weightInput  = card.querySelector(".section-weight");
-
-      sections[secId] = {
-        enabled: enabledInput ? enabledInput.checked : true,
-        weight:  weightInput ? parseFloat(weightInput.value || "0") : 1.0,
-      };
-    });
-
-    // Checks
-    const checkRows = document.querySelectorAll(".settings-check-row");
-    checkRows.forEach(row => {
-      const checkId = row.dataset.checkId;
-      const enabled = row.querySelector(".check-enabled");
-      const weight  = row.querySelector(".check-weight");
-      const desc    = row.querySelector(".check-desc");
-
-      checks[checkId] = {
-        enabled: enabled ? enabled.checked : true,
-        weight:  weight ? parseFloat(weight.value || "0") : 1.0,
-        description: desc ? desc.value : "",
-      };
-    });
-
-    return { sections, checks };
-  }
-
-  // --- Guardar (POST /api/settings/save) ---
-  async function saveOverrides() {
-    if (!root) return;
-
-    const meta = {
-      site: root.dataset.site || "PROSTATE",
-      clinic_id: root.dataset.clinicId || "DEFAULT",
-      machine: root.dataset.machine || "HALCYON",
-    };
-
-    const overrides = collectOverrides();
-
-    const payload = {
-      ...meta,
-      sections: overrides.sections,
-      checks: overrides.checks,
-    };
-
-    try {
-      const resp = await fetch("/api/settings/save", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-      });
-
-      if (!resp.ok) {
-        throw new Error("Error HTTP " + resp.status);
-      }
-
-      const data = await resp.json();
-      console.log("Overrides guardados:", data);
-
-      alert("Overrides guardados en qa_overrides.json");
-    } catch (err) {
-      console.error(err);
-      alert("Error al guardar overrides: " + err.message);
     }
-  }
+    
+    // Mostrar progreso al enviar el formulario
+    if (runForm) {
+        runForm.addEventListener('submit', function(e) {
+            // No prevenir el envío - dejar que el formulario se envíe normalmente
+            // Solo mostramos la barra de progreso
+            
+            // Mostrar contenedor
+            progressContainer.classList.remove('hidden');
+            
+            // Resetear progreso
+            currentStage = 'validating';
+            currentProgress = 0;
+            stageStartTime = Date.now();
+            
+            // Actualizar UI inicial
+            progressFill.style.width = '0%';
+            progressPercent.textContent = '0%';
+            progressMessage.textContent = qaStages.validating.message;
+            progressStep.textContent = 'Iniciando QA...';
+            
+            // Iniciar actualizaciones cada 100ms
+            clearInterval(progressInterval);
+            progressInterval = setInterval(updateProgress, 100);
+            
+            // Ocultar mensaje de éxito si existe
+            const successAlert = document.querySelector('.alert-success');
+            if (successAlert) {
+                successAlert.style.display = 'none';
+            }
+            
+            // También ocultar resultados anteriores mientras carga
+            const resultSection = document.querySelector('section.card');
+            if (resultSection) {
+                resultSection.style.opacity = '0.5';
+            }
+        });
+    }
+    
+    // Cuando la página carga con resultados (después del QA), ocultar la barra
+    window.addEventListener('load', function() {
+        if (document.querySelector('.summary-card')) {
+            progressContainer.classList.add('hidden');
+            const resultSection = document.querySelector('section.card');
+            if (resultSection) {
+                resultSection.style.opacity = '1';
+            }
+        }
+    });
+    
+    // También detectar si hay un QA en progreso cuando se recarga la página
+    if (window.performance && window.performance.navigation) {
+        if (window.performance.navigation.type === 1) { // Tipo 1 es reload
+            // Verificar si había un QA reciente (podrías usar sessionStorage)
+            const lastQATime = sessionStorage.getItem('lastQAStart');
+            if (lastQATime && (Date.now() - parseInt(lastQATime) < 30000)) {
+                // Mostrar barra porque el QA podría estar en progreso
+                progressContainer.classList.remove('hidden');
+            }
+        }
+    }
+    
+    // Guardar hora de inicio del QA
+    if (runForm) {
+        runForm.addEventListener('submit', function() {
+            sessionStorage.setItem('lastQAStart', Date.now().toString());
+        });
+    }
+});
 
-  if (saveBtn) {
-    saveBtn.addEventListener("click", saveOverrides);
-  }
+// ==================== AUTO-SCROLL MEJORADO ====================
+document.addEventListener('DOMContentLoaded', function() {
+    // Si hay un mensaje en la URL, mostrarlo y hacer scroll
+    const urlParams = new URLSearchParams(window.location.search);
+    const message = urlParams.get('message');
+    
+    if (message) {
+        // Decodificar el mensaje (está URL-encoded)
+        const decodedMessage = decodeURIComponent(message);
+        
+        // Crear alerta si no existe
+        if (!document.querySelector('.alert-success')) {
+            const alertDiv = document.createElement('div');
+            alertDiv.className = 'alert-success';
+            alertDiv.innerHTML = `✅ ${decodedMessage}`;
+            
+            // Insertar después del header
+            const header = document.querySelector('.header');
+            if (header) {
+                header.parentNode.insertBefore(alertDiv, header.nextSibling);
+            }
+            
+            // Hacer scroll suave a la alerta
+            setTimeout(() => {
+                alertDiv.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                
+                // Auto-ocultar después de 8 segundos
+                setTimeout(() => {
+                    alertDiv.style.opacity = '0';
+                    setTimeout(() => alertDiv.remove(), 300);
+                }, 8000);
+            }, 300);
+        }
+    }
+});
+</script>
+
+<!-- Modal de Confirmación Personalizado -->
+<div id="confirmation-modal" class="confirmation-modal" aria-hidden="true">
+    <div class="confirmation-modal-backdrop"></div>
+    
+    <div class="confirmation-content">
+        <div class="confirmation-header">
+            <div class="confirmation-icon">✅</div>
+            <h3 class="confirmation-title">Configuración Guardada</h3>
+        </div>
+        
+        <div class="confirmation-body">
+            <p>Los cambios se han guardado exitosamente en <code>qa_overrides.json</code>.</p>
+            <p>¿Te gustaría volver al panel principal y ejecutar el QA para ver los cambios aplicados?</p>
+        </div>
+        
+        <div class="confirmation-footer">
+            <button type="button" class="confirmation-btn confirmation-btn-secondary" id="confirmation-cancel">
+                Permanecer aquí
+            </button>
+            <button type="button" class="confirmation-btn confirmation-btn-primary" id="confirmation-accept">
+                Ir al Panel y Ejecutar QA
+            </button>
+        </div>
+    </div>
+</div>
+
+<!-- JavaScript para el modal -->
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const confirmationModal = document.getElementById('confirmation-modal');
+    const confirmationCancel = document.getElementById('confirmation-cancel');
+    const confirmationAccept = document.getElementById('confirmation-accept');
+    
+    // Mostrar modal cuando se guarda (detectamos el submit del formulario)
+    const saveForm = document.querySelector('form[method="post"]');
+    if (saveForm) {
+        saveForm.addEventListener('submit', function(e) {
+            // Prevenir el envío normal (queremos mostrar nuestro modal primero)
+            e.preventDefault();
+            
+            // Obtener los datos del formulario
+            const formData = new FormData(this);
+            
+            // Mostrar nuestro modal personalizado
+            confirmationModal.classList.add('is-open');
+            
+            // Guardar la configuración en segundo plano cuando el usuario acepta
+            confirmationAccept.addEventListener('click', function saveAndRedirect() {
+                // Enviar el formulario realmente
+                fetch('/settings/save', {
+                    method: 'POST',
+                    body: formData
+                })
+                .then(response => {
+                    if (response.ok) {
+                        // Redirigir al panel principal
+                        window.location.href = '/';
+                    } else {
+                        alert('Error al guardar la configuración');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error:', error);
+                    alert('Error de conexión');
+                });
+                
+                // Remover el event listener para evitar múltiples ejecuciones
+                confirmationAccept.removeEventListener('click', saveAndRedirect);
+            }, { once: true }); // El { once: true } asegura que se ejecute solo una vez
+            
+            // Cancelar: solo cerrar el modal
+            confirmationCancel.addEventListener('click', function() {
+                confirmationModal.classList.remove('is-open');
+            });
+        });
+    }
+    
+    // También cerrar con ESC o haciendo clic en el backdrop
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Escape' && confirmationModal.classList.contains('is-open')) {
+            confirmationModal.classList.remove('is-open');
+        }
+    });
+    
+    confirmationModal.querySelector('.confirmation-modal-backdrop').addEventListener('click', function() {
+        confirmationModal.classList.remove('is-open');
+    });
 });
 </script>
 
