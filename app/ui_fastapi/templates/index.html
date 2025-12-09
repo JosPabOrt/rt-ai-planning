@@ -10,15 +10,20 @@
 
     <!-- CABECERA / FORM -->
     <header class="header">
-      <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
-        <div>
-          <h1>Halcyon QA – Panel</h1>
-          <p class="subtitle">Prototype · FastAPI</p>
-        </div>
-        <button id="theme_toggle" type="button" class="btn-ghost">
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+            <div>
+            <h1>Halcyon QA – Panel</h1>  <!-- o Settings -->
+            <p class="subtitle">Prototype · FastAPI</p>
+            </div>
+            <button id="theme_toggle" type="button" class="btn-ghost">
             🌙 Dark mode
-        </button>
-     </div>
+            </button>
+        </div>
+
+        <nav class="nav-tabs">
+            <a href="/" class="nav-tab {% if active_tab == 'panel' %}nav-tab-active{% endif %}">Panel</a>
+            <a href="/settings" class="nav-tab {% if active_tab == 'settings' %}nav-tab-active{% endif %}">Settings</a>
+        </nav>
 
         <form method="post" action="/run" class="run-form">
             <div class="form-row">

@@ -1,14 +1,15 @@
 from pathlib import Path
 import sys
+import io
+import csv
+import json
 from collections import defaultdict
+from typing import Any, Dict
 
-from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, Request, Form, Body
+from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import StreamingResponse
-
-import io, csv
 
 # ==========================================================
 # AÑADIR src/ AL PYTHONPATH (desde app/ui_fastapi/main.py)
@@ -21,20 +22,21 @@ SRC_DIR = PROJECT_ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.append(str(SRC_DIR))
 
+# ==========================================================
+# IMPORTS MOTOR QA + CONFIG
+# ==========================================================
 
-# ==========================================================
-# IMPORTS DE TU MOTOR REAL
-# ==========================================================
 from core.build_case import build_case_from_dicom
 from qa.engine import evaluate_case
-
+from qa.config import build_ui_config
+from qa.config_overrides import load_overrides, save_overrides
 
 # ==========================================================
 # FASTAPI APP
 # ==========================================================
+
 app = FastAPI(title="RT-AI QA UI")
 
-# static y templates están en: src/app/static y src/app/templates
 app.mount(
     "/static",
     StaticFiles(directory=str(BASE_DIR / "static")),
@@ -43,15 +45,13 @@ app.mount(
 
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
-
 # ==========================================================
 # Helpers
 # ==========================================================
+
 def _infer_group_from_name(name: str) -> str:
     """
     Fallback por si algún CheckResult aún no trae .group.
-    La idea es que, a largo plazo, casi no se use esto porque
-    el motor ya envía group="CT"/"Structures"/"Plan"/"Dose".
     """
     n = (name or "").lower()
 
@@ -73,25 +73,14 @@ def _infer_group_from_name(name: str) -> str:
 def _normalize_check(chk) -> dict:
     """
     Convierte un CheckResult en un dict simple para la plantilla.
-
-    Usa:
-      - chk.name
-      - chk.group (o lo infiere por nombre)
-      - chk.passed  → status PASS/FAIL
-      - chk.score
-      - chk.message
-      - chk.recommendation
     """
-    # Nombre
     name = getattr(chk, "name", None)
     if name is None:
         name = getattr(chk, "id", "Unnamed check")
 
-    # Grupo – primero intentamos usar el que viene del backend
     raw_group = getattr(chk, "group", None)
     group = raw_group if raw_group else _infer_group_from_name(name)
 
-    # Status: solo usamos `passed` del backend
     passed_attr = getattr(chk, "passed", None)
     if passed_attr is True:
         status = "PASS"
@@ -100,10 +89,7 @@ def _normalize_check(chk) -> dict:
     else:
         status = "UNKNOWN"
 
-    # Score (0–1 normalmente)
     score = getattr(chk, "score", None)
-
-    # Mensaje y recomendación
     message = getattr(chk, "message", "")
     recommendation = getattr(chk, "recommendation", "")
 
@@ -117,16 +103,21 @@ def _normalize_check(chk) -> dict:
     }
 
 
+# alias para export_csv
+def _normalize_check_for_ui(chk) -> dict:
+    return _normalize_check(chk)
+
 # ==========================================================
-# GET /
+# GET /  → Panel principal
 # ==========================================================
+
 @app.get("/", response_class=HTMLResponse)
 async def home(request: Request):
+    # Sin resultado inicial
     return templates.TemplateResponse(
         "index.html",
         {
             "request": request,
-            "message": "Hola Paola, FastAPI ya está vivo 🚀",
             "result": None,
             "error": None,
             "data_root": "",
@@ -134,10 +125,10 @@ async def home(request: Request):
         },
     )
 
-
 # ==========================================================
 # POST /run → Ejecutar QA real
 # ==========================================================
+
 @app.post("/run", response_class=HTMLResponse)
 async def run_qa(
     request: Request,
@@ -145,9 +136,6 @@ async def run_qa(
     patient_id: str = Form(...),
 ):
     try:
-        # -----------------------------
-        # Paths del paciente
-        # -----------------------------
         patient_dir = Path(data_root) / patient_id
 
         ct_path       = patient_dir / "CT"
@@ -160,9 +148,6 @@ async def run_qa(
         if not rtstruct_path.exists():
             raise FileNotFoundError(f"No se encontró RTSTRUCT en {rtstruct_path}")
 
-        # -----------------------------
-        # Motor QA
-        # -----------------------------
         case = build_case_from_dicom(
             patient_id=patient_id,
             ct_folder=str(ct_path),
@@ -173,12 +158,8 @@ async def run_qa(
 
         qa_result = evaluate_case(case)
 
-        # Normalizar todos los checks
         checks = [_normalize_check(chk) for chk in qa_result.checks]
 
-        # -----------------------------
-        # Resumen PASS / WARN / FAIL
-        # -----------------------------
         def _is_pass(s: str) -> bool:
             return str(s).upper() == "PASS"
 
@@ -200,9 +181,6 @@ async def run_qa(
             "warning": num_warn,
         }
 
-        # -----------------------------
-        # Estado global
-        # -----------------------------
         global_status = getattr(qa_result, "status", None)
         if global_status is None and hasattr(qa_result, "overall_status"):
             global_status = getattr(qa_result, "overall_status")
@@ -217,19 +195,11 @@ async def run_qa(
             else:
                 global_status = "UNKNOWN"
 
-        # -----------------------------
-        # Agrupar por grupo clínico
-        # -----------------------------
         grouped = defaultdict(list)
         for c in checks:
             gname = c.get("group") or "General"
             grouped[gname].append(c)
 
-        print("[QA-UI] Grupos detectados:", list(grouped.keys()))
-
-        # Lo que espera el HTML nuevo:
-        # - grouped_checks: dict {grupo: [checks...]}
-        # - groups: lista de nombres de grupo
         grouped_checks = dict(grouped)
         group_names = list(grouped_checks.keys())
 
@@ -247,9 +217,6 @@ async def run_qa(
         result = None
         error = str(e)
 
-    # -----------------------------
-    # Devolver plantilla
-    # -----------------------------
     return templates.TemplateResponse(
         "index.html",
         {
@@ -261,13 +228,12 @@ async def run_qa(
         },
     )
 
+# ==========================================================
+# GET /export/csv
+# ==========================================================
+
 @app.get("/export/csv")
 async def export_csv(data_root: str, patient_id: str):
-    """
-    Genera un CSV con todos los checks del QA.
-    Se vuelve a evaluar el caso con los mismos parámetros.
-    """
-    # Construir paths igual que en /run
     patient_dir   = Path(data_root) / patient_id
     ct_path       = patient_dir / "CT"
     rtstruct_path = patient_dir / "RTSTRUCT.dcm"
@@ -283,8 +249,6 @@ async def export_csv(data_root: str, patient_id: str):
     )
 
     qa_result = evaluate_case(case)
-
-    # Normalizar checks igual que en la UI
     checks = [_normalize_check_for_ui(chk) for chk in qa_result.checks]
 
     buffer = io.StringIO()
@@ -296,7 +260,7 @@ async def export_csv(data_root: str, patient_id: str):
             c.get("name", ""),
             c.get("status", ""),
             c.get("score", ""),
-            c.get("message", "").replace("\n", " "),
+            (c.get("message") or "").replace("\n", " "),
             (c.get("recommendation") or "").replace("\n", " "),
         ])
 
@@ -305,6 +269,103 @@ async def export_csv(data_root: str, patient_id: str):
     headers = {
         "Content-Disposition": f'attachment; filename="{filename}"'
     }
-    return StreamingResponse(iter([buffer.getvalue()]),
-                             media_type="text/csv",
-                             headers=headers)
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers=headers,
+    )
+
+# ==========================================================
+# UI SETTINGS
+# ==========================================================
+
+@app.get("/settings", response_class=HTMLResponse)
+async def settings_page(
+    request: Request,
+    site: str = "PROSTATE",
+    clinic_id: str = "DEFAULT",
+    machine: str = "HALCYON",
+):
+    """
+    Página de Settings. Renderiza settings.html con la
+    configuración efectiva (base + overrides).
+    """
+    ui_cfg = build_ui_config(
+        clinic_id=clinic_id,
+        site=site,
+        machine_name=machine,
+    )
+
+    return templates.TemplateResponse(
+        "settings.html",
+        {
+            "request": request,
+            "ui_config": ui_cfg,
+            # versión serializada para JS embebido
+            "ui_config_json": json.dumps(ui_cfg),
+            "site": site,
+            "clinic_id": clinic_id,
+            "machine": machine,
+        },
+    )
+
+# ==========================================================
+# API SETTINGS – obtener config y guardar overrides
+# ==========================================================
+
+@app.get("/api/settings/config")
+async def api_settings_config(
+    site: str = "PROSTATE",
+    clinic_id: str = "DEFAULT",
+    machine: str = "HALCYON",
+):
+    """
+    Devuelve la configuración completa para la UI de settings.
+    """
+    ui_cfg = build_ui_config(
+        clinic_id=clinic_id,
+        site=site,
+        machine_name=machine,
+    )
+    return JSONResponse(ui_cfg)
+
+
+@app.post("/api/settings/save")
+async def api_settings_save(payload: Dict[str, Any] = Body(...)):
+    """
+    Recibe un JSON con overrides y los guarda en qa_overrides.json.
+
+    Espera algo del estilo:
+    {
+      "sections": { "CT": { "enabled": true, "weight": 0.25 }, ... },
+      "checks": {
+        "CT.CT_GEOMETRY": {
+          "enabled": true,
+          "weight": 1.0,
+          "params": { ... },
+          "texts": { ... }
+        },
+        ...
+      }
+    }
+    """
+    sections = payload.get("sections", {})
+    checks = payload.get("checks", {})
+
+    current = load_overrides()
+    current["sections"].update(sections)
+    current["checks"].update(checks)
+
+    save_overrides(current)
+
+    # Opcional: devolver la config efectiva ya con overrides aplicados
+    site = payload.get("site", "PROSTATE")
+    clinic_id = payload.get("clinic_id", "DEFAULT")
+    machine = payload.get("machine", "HALCYON")
+    ui_cfg = build_ui_config(
+        clinic_id=clinic_id,
+        site=site,
+        machine_name=machine,
+    )
+
+    return JSONResponse({"ok": True, "ui_config": ui_cfg})
