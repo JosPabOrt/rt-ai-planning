@@ -1,18 +1,14 @@
 from pathlib import Path
 import sys
+from collections import defaultdict
 import io
 import csv
-import json
-from collections import defaultdict
 from typing import Any, Dict
 
 from fastapi import FastAPI, Request, Form, Body
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-
-from qa.config import build_dynamic_defaults
-
 
 # ==========================================================
 # AÑADIR src/ AL PYTHONPATH (desde app/ui_fastapi/main.py)
@@ -26,12 +22,13 @@ if str(SRC_DIR) not in sys.path:
     sys.path.append(str(SRC_DIR))
 
 # ==========================================================
-# IMPORTS MOTOR QA + CONFIG
+# IMPORTS DEL MOTOR QA
 # ==========================================================
 
 from core.build_case import build_case_from_dicom
 from qa.engine import evaluate_case
-from qa.config import build_ui_config
+from qa.build_ui_config import get_effective_configs  # config efectiva (con overrides)
+from qa.config import build_ui_config                 # config "gorda" para settings
 from qa.config_overrides import load_overrides, save_overrides
 
 # ==========================================================
@@ -106,9 +103,10 @@ def _normalize_check(chk) -> dict:
     }
 
 
-# alias para export_csv
 def _normalize_check_for_ui(chk) -> dict:
+    """Alias para export_csv."""
     return _normalize_check(chk)
+
 
 # ==========================================================
 # GET /  → Panel principal
@@ -125,11 +123,14 @@ async def home(request: Request):
             "error": None,
             "data_root": "",
             "patient_id": "",
+            "grouped_checks": {},
+            "groups": [],
         },
     )
 
+
 # ==========================================================
-# POST /run → Ejecutar QA real
+# POST /run → Ejecutar QA real (usando config efectiva)
 # ==========================================================
 
 @app.post("/run", response_class=HTMLResponse)
@@ -139,6 +140,9 @@ async def run_qa(
     patient_id: str = Form(...),
 ):
     try:
+        # -----------------------------
+        # Paths del paciente
+        # -----------------------------
         patient_dir = Path(data_root) / patient_id
 
         ct_path       = patient_dir / "CT"
@@ -151,6 +155,9 @@ async def run_qa(
         if not rtstruct_path.exists():
             raise FileNotFoundError(f"No se encontró RTSTRUCT en {rtstruct_path}")
 
+        # -----------------------------
+        # Motor QA
+        # -----------------------------
         case = build_case_from_dicom(
             patient_id=patient_id,
             ct_folder=str(ct_path),
@@ -161,8 +168,35 @@ async def run_qa(
 
         qa_result = evaluate_case(case)
 
-        checks = [_normalize_check(chk) for chk in qa_result.checks]
+        # Normalizamos todos los CheckResult → dicts para UI
+        all_checks = [_normalize_check(chk) for chk in qa_result.checks]
 
+        # -----------------------------
+        # 1) Cargar configuración efectiva (global + overrides)
+        # -----------------------------
+        eff = get_effective_configs()
+        checks_cfg = eff["checks"]  # { "CT": {"CT_GEOMETRY": {...}}, ... }
+
+        # Mapa de result_name → enabled según config efectiva
+        enabled_by_result_name: Dict[str, bool] = {}
+        for section, checks_conf in checks_cfg.items():
+            for check_key, cfg in checks_conf.items():
+                rn = cfg.get("result_name")
+                if rn:
+                    enabled_by_result_name[rn] = bool(cfg.get("enabled", True))
+
+        # -----------------------------
+        # 2) Filtrar los checks deshabilitados
+        # -----------------------------
+        filtered_checks = []
+        for c in all_checks:
+            enabled = enabled_by_result_name.get(c["name"], True)
+            if enabled:
+                filtered_checks.append(c)
+
+        # -----------------------------
+        # 3) Resumen PASS / WARN / FAIL
+        # -----------------------------
         def _is_pass(s: str) -> bool:
             return str(s).upper() == "PASS"
 
@@ -173,17 +207,20 @@ async def run_qa(
             up = str(s).upper()
             return "WARN" in up or "ALERT" in up or "CAUTION" in up
 
-        num_pass = sum(1 for c in checks if _is_pass(c["status"]))
-        num_fail = sum(1 for c in checks if _is_fail(c["status"]))
-        num_warn = sum(1 for c in checks if _is_warning(c["status"]))
+        num_pass = sum(1 for c in filtered_checks if _is_pass(c["status"]))
+        num_fail = sum(1 for c in filtered_checks if _is_fail(c["status"]))
+        num_warn = sum(1 for c in filtered_checks if _is_warning(c["status"]))
 
         summary = {
-            "total": len(checks),
+            "total": len(filtered_checks),
             "pass": num_pass,
             "fail": num_fail,
             "warning": num_warn,
         }
 
+        # -----------------------------
+        # 4) Estado global
+        # -----------------------------
         global_status = getattr(qa_result, "status", None)
         if global_status is None and hasattr(qa_result, "overall_status"):
             global_status = getattr(qa_result, "overall_status")
@@ -193,13 +230,16 @@ async def run_qa(
                 global_status = "FAIL"
             elif num_warn > 0:
                 global_status = "WARNING"
-            elif num_pass == len(checks) and len(checks) > 0:
+            elif num_pass == len(filtered_checks) and len(filtered_checks) > 0:
                 global_status = "PASS"
             else:
                 global_status = "UNKNOWN"
 
+        # -----------------------------
+        # 5) Agrupar por grupo clínico (ya filtrados)
+        # -----------------------------
         grouped = defaultdict(list)
-        for c in checks:
+        for c in filtered_checks:
             gname = c.get("group") or "General"
             grouped[gname].append(c)
 
@@ -218,6 +258,8 @@ async def run_qa(
 
     except Exception as e:
         result = None
+        grouped_checks = {}
+        group_names = []
         error = str(e)
 
     return templates.TemplateResponse(
@@ -228,8 +270,11 @@ async def run_qa(
             "error": error,
             "data_root": data_root,
             "patient_id": patient_id,
+            "grouped_checks": grouped_checks,
+            "groups": group_names,
         },
     )
+
 
 # ==========================================================
 # GET /export/csv
@@ -278,42 +323,140 @@ async def export_csv(data_root: str, patient_id: str):
         headers=headers,
     )
 
+
 # ==========================================================
-# UI SETTINGS
+# UI SETTINGS – Vistas HTML
 # ==========================================================
 
 @app.get("/settings", response_class=HTMLResponse)
-async def settings_page(
-    request: Request,
-    site: str = "PROSTATE",
-    clinic_id: str = "DEFAULT",
-    machine: str = "HALCYON",
-):
+async def settings_page(request: Request):
     """
-    Página de Settings. Renderiza settings.html con la
-    configuración efectiva (base + overrides).
+    Página de settings (cuando haces click en la pestaña Settings).
     """
-    ui_cfg = build_ui_config(
-        clinic_id=clinic_id,
-        site=site,
-        machine_name=machine,
-    )
+    raw_cfg = build_ui_config()
+
+    # --- asegurar meta con la forma que espera el template ---
+    meta = raw_cfg.get("meta") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+
+    clinic_profile = meta.get("clinic_profile") or {
+        "clinic_id": "DEFAULT",
+        "label": "Default clinic profile",
+    }
+    machine_profile = meta.get("machine_profile") or {
+        "machine_id": "HALCYON",
+        "label": "Varian Halcyon",
+    }
+    effective_site = meta.get("effective_site") or raw_cfg.get("effective_site") or "PROSTATE"
+
+    meta = {
+        "clinic_profile": clinic_profile,
+        "machine_profile": machine_profile,
+        "effective_site": effective_site,
+    }
+
+    ui_config = {
+        "meta": meta,
+        "sections": raw_cfg.get("sections", []),
+        "checks": raw_cfg.get("checks", []),
+        "raw": raw_cfg,
+    }
 
     return templates.TemplateResponse(
         "settings.html",
         {
             "request": request,
-            "ui_config": ui_cfg,
-            # versión serializada para JS embebido
-            "ui_config_json": json.dumps(ui_cfg),
-            "site": site,
-            "clinic_id": clinic_id,
-            "machine": machine,
+            "ui_config": ui_config,
+            "sections": ui_config["sections"],
+            "checks": ui_config["checks"],
+            "raw": ui_config["raw"],
+            "message": None,
         },
     )
 
+
+@app.post("/settings/save", response_class=HTMLResponse)
+async def save_settings(request: Request):
+    """
+    Versión simple basada en formulario HTML.
+    Guarda enabled/weight por check en qa_overrides.json.
+    """
+    form = await request.form()
+
+    overrides = load_overrides()
+    overrides.setdefault("sections", {})
+    overrides.setdefault("checks", {})
+
+    eff = get_effective_configs()
+    checks_cfg = eff["checks"]
+
+    for section, checks in checks_cfg.items():
+        for check_key, cfg in checks.items():
+            cid = f"{section}.{check_key}"
+
+            enabled_field = f"enabled_{cid}"
+            weight_field = f"weight_{cid}"
+
+            enabled = enabled_field in form
+            weight_raw = form.get(weight_field)
+
+            ck_override = overrides["checks"].setdefault(cid, {})
+            ck_override["enabled"] = enabled
+
+            if weight_raw is not None and str(weight_raw).strip() != "":
+                try:
+                    ck_override["weight"] = float(weight_raw)
+                except ValueError:
+                    pass  # ignorar valores inválidos
+
+    save_overrides(overrides)
+
+    # reconstruir config para mostrarla ya con overrides
+    raw_cfg = build_ui_config()
+
+    meta = raw_cfg.get("meta") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+
+    clinic_profile = meta.get("clinic_profile") or {
+        "clinic_id": "DEFAULT",
+        "label": "Default clinic profile",
+    }
+    machine_profile = meta.get("machine_profile") or {
+        "machine_id": "HALCYON",
+        "label": "Varian Halcyon",
+    }
+    effective_site = meta.get("effective_site") or raw_cfg.get("effective_site") or "PROSTATE"
+
+    meta = {
+        "clinic_profile": clinic_profile,
+        "machine_profile": machine_profile,
+        "effective_site": effective_site,
+    }
+
+    ui_config = {
+        "meta": meta,
+        "sections": raw_cfg.get("sections", []),
+        "checks": raw_cfg.get("checks", []),
+        "raw": raw_cfg,
+    }
+
+    return templates.TemplateResponse(
+        "settings.html",
+        {
+            "request": request,
+            "ui_config": ui_config,
+            "sections": ui_config["sections"],
+            "checks": ui_config["checks"],
+            "raw": ui_config["raw"],
+            "message": "Configuración guardada en qa_overrides.json",
+        },
+    )
+
+
 # ==========================================================
-# API SETTINGS – obtener config y guardar overrides
+# API SETTINGS – obtener config y guardar overrides (JSON)
 # ==========================================================
 
 @app.get("/api/settings/config")
@@ -322,36 +465,43 @@ async def api_settings_config(
     clinic_id: str = "DEFAULT",
     machine: str = "HALCYON",
 ):
-    """
-    Devuelve la configuración completa para la UI de settings.
-    """
-    ui_cfg = build_ui_config(
+    raw_cfg = build_ui_config(
         clinic_id=clinic_id,
         site=site,
         machine_name=machine,
     )
+
+    meta = raw_cfg.get("meta") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+
+    clinic_profile = meta.get("clinic_profile") or {
+        "clinic_id": clinic_id,
+        "label": "Clinic profile",
+    }
+    machine_profile = meta.get("machine_profile") or {
+        "machine_id": machine,
+        "label": "Machine profile",
+    }
+    effective_site = meta.get("effective_site") or site
+
+    meta = {
+        "clinic_profile": clinic_profile,
+        "machine_profile": machine_profile,
+        "effective_site": effective_site,
+    }
+
+    ui_cfg = {
+        "meta": meta,
+        "sections": raw_cfg.get("sections", []),
+        "checks": raw_cfg.get("checks", []),
+        "raw": raw_cfg,
+    }
     return JSONResponse(ui_cfg)
 
 
 @app.post("/api/settings/save")
 async def api_settings_save(payload: Dict[str, Any] = Body(...)):
-    """
-    Recibe un JSON con overrides y los guarda en qa_overrides.json.
-
-    Espera algo del estilo:
-    {
-      "sections": { "CT": { "enabled": true, "weight": 0.25 }, ... },
-      "checks": {
-        "CT.CT_GEOMETRY": {
-          "enabled": true,
-          "weight": 1.0,
-          "params": { ... },
-          "texts": { ... }
-        },
-        ...
-      }
-    }
-    """
     sections = payload.get("sections", {})
     checks = payload.get("checks", {})
 
@@ -361,14 +511,41 @@ async def api_settings_save(payload: Dict[str, Any] = Body(...)):
 
     save_overrides(current)
 
-    # Opcional: devolver la config efectiva ya con overrides aplicados
     site = payload.get("site", "PROSTATE")
     clinic_id = payload.get("clinic_id", "DEFAULT")
     machine = payload.get("machine", "HALCYON")
-    ui_cfg = build_ui_config(
+
+    raw_cfg = build_ui_config(
         clinic_id=clinic_id,
         site=site,
         machine_name=machine,
     )
+
+    meta = raw_cfg.get("meta") or {}
+    if not isinstance(meta, dict):
+        meta = {}
+
+    clinic_profile = meta.get("clinic_profile") or {
+        "clinic_id": clinic_id,
+        "label": "Clinic profile",
+    }
+    machine_profile = meta.get("machine_profile") or {
+        "machine_id": machine,
+        "label": "Machine profile",
+    }
+    effective_site = meta.get("effective_site") or site
+
+    meta = {
+        "clinic_profile": clinic_profile,
+        "machine_profile": machine_profile,
+        "effective_site": effective_site,
+    }
+
+    ui_cfg = {
+        "meta": meta,
+        "sections": raw_cfg.get("sections", []),
+        "checks": raw_cfg.get("checks", []),
+        "raw": raw_cfg,
+    }
 
     return JSONResponse({"ok": True, "ui_config": ui_cfg})

@@ -3254,16 +3254,16 @@ def get_dose_recommendations(check_key: str, scenario: str) -> Dict[str, str]:
 from typing import Callable
 
 
-# ------------------------------------------------------------
-# U.1) UI METADATA / DISPLAY NAMES / CATEGORIES
-# ------------------------------------------------------------
+# ============================================================
+# U) HELPERS PARA LA UI (SECCIONES Y CHECKS)
+# ============================================================
 
-# Categorías lógicas por sección, pensadas para la UI
+# Metadatos de secciones para la UI (si no lo tienes ya definido arriba)
 UI_SECTION_METADATA: Dict[str, Dict[str, Any]] = {
     "CT": {
         "display_name": "CT",
         "category": "Imaging / Geometry",
-        "icon": "icon-ct",  # tu UI puede mapear esto a un icono real
+        "icon": "icon-ct",
         "order": 10,
     },
     "Structures": {
@@ -3293,20 +3293,24 @@ UI_SECTION_METADATA: Dict[str, Dict[str, Any]] = {
 }
 
 
-def build_ui_checks_metadata_from_config(
-    checks_cfg: Optional[Dict[str, Dict[str, Any]]] = None
-) -> List[Dict[str, Any]]:
+def build_ui_checks_metadata() -> List[Dict[str, Any]]:
     """
     Construye una lista plana de metadatos de checks para la UI.
 
-    Si checks_cfg es None, usa GLOBAL_CHECK_CONFIG (útil para debugging),
-    pero en la práctica build_ui_config le pasa la config efectiva
-    (base + overrides).
+    Cada entrada tiene:
+      - id:        "<section>.<check_key>"
+      - section:   "CT" / "Structures" / ...
+      - check_key: clave interna en GLOBAL_CHECK_CONFIG
+      - result_name: nombre visible (CheckResult.name)
+      - label:     alias legible (por ahora igual a result_name)
+      - enabled:   bool
+      - weight:    float
+      - description: str (si existe)
+      - ui_category: texto derivado de la sección (para agrupar en UI)
     """
-    source = checks_cfg if checks_cfg is not None else GLOBAL_CHECK_CONFIG
     items: List[Dict[str, Any]] = []
 
-    for section, checks in source.items():
+    for section, checks in GLOBAL_CHECK_CONFIG.items():
         sec_meta = UI_SECTION_METADATA.get(section, {})
         ui_category = sec_meta.get("category", section)
 
@@ -3326,6 +3330,7 @@ def build_ui_checks_metadata_from_config(
                 }
             )
 
+    # Orden por sección (order en UI_SECTION_METADATA) y luego por id
     def _sort_key(item: Dict[str, Any]) -> tuple:
         sec = item["section"]
         sec_order = UI_SECTION_METADATA.get(sec, {}).get("order", 999)
@@ -3335,18 +3340,15 @@ def build_ui_checks_metadata_from_config(
     return items
 
 
-def build_ui_sections_metadata_from_config(
-    sections_cfg: Optional[Dict[str, Dict[str, Any]]] = None
-) -> List[Dict[str, Any]]:
+def build_ui_sections_metadata() -> List[Dict[str, Any]]:
     """
     Devuelve metadatos de secciones para la UI, combinando:
-      - sections_cfg (si se pasa) o GLOBAL_SECTION_CONFIG
+      - GLOBAL_SECTION_CONFIG
       - UI_SECTION_METADATA
     """
-    source = sections_cfg if sections_cfg is not None else GLOBAL_SECTION_CONFIG
     res: List[Dict[str, Any]] = []
 
-    for section, cfg in source.items():
+    for section, cfg in GLOBAL_SECTION_CONFIG.items():
         ui_meta = UI_SECTION_METADATA.get(section, {})
         res.append(
             {
@@ -3363,15 +3365,6 @@ def build_ui_sections_metadata_from_config(
     res.sort(key=lambda x: x["order"])
     return res
 
-
-
-    # Mantener los nombres antiguos para compatibilidad
-    def build_ui_sections_metadata() -> List[Dict[str, Any]]:
-        return build_ui_sections_metadata_from_config(GLOBAL_SECTION_CONFIG)
-
-
-    def build_ui_checks_metadata() -> List[Dict[str, Any]]:
-        return build_ui_checks_metadata_from_config(GLOBAL_CHECK_CONFIG)
 
 
 # ============================================================
