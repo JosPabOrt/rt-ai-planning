@@ -316,10 +316,21 @@ def build_ui_config(
 ) -> Dict[str, Any]:
     """
     Compila en una sola estructura toda la info necesaria para la UI.
+
+    Incluye:
+      - metadatos de secciones (ya con overrides y defaults dinámicos)
+      - metadatos de checks (ya con overrides y defaults dinámicos)
+      - perfil de clínica
+      - perfil de máquina (inferido)
+      - PROFILE agregado por sitio (para compatibilidad)
+      - configuración agregada de scoring
+      - config de reporting
+      - resultado de validate_config()
     """
     clinic_profile = get_clinic_profile(clinic_id)
     machine_profile = infer_machine_profile(machine_name)
 
+    # Sitio efectivo: si no lo pasan, usamos el del profile/máquina
     effective_site = (
         site
         or clinic_profile.get("default_site")
@@ -327,24 +338,22 @@ def build_ui_config(
         or "DEFAULT"
     )
 
-    # Vista efectiva base+overrides+normalización
-    dyn = build_dynamic_defaults(site=effective_site, clinic_id=clinic_id)
-    eff_sections = dyn["sections"]
-    eff_checks = dyn["checks"]
+    # Config efectiva (base + overrides + normalización)
+    dyn = build_dynamic_defaults(site=effective_site, clinic_id=clinic_id, use_overrides=True)
+    sections_eff = dyn["sections"]
+    checks_eff = dyn["checks"]
 
-    # Metadatos a partir de la vista efectiva
-    sections_meta = build_ui_sections_metadata_from_config(eff_sections)
-    checks_meta = build_ui_checks_metadata_from_config(eff_checks)
-
+    # Perfiles agregados/scoring/reporting
     site_profile = get_site_profile(effective_site)
     aggregate_scoring = get_aggregate_scoring_config(effective_site)
     reporting_cfg = get_reporting_config()
     validation = validate_config(strict=False)
 
-    from src.qa.config_overrides import load_overrides
-    overrides_raw = load_overrides()
+    # Metadatos para UI usando la config efectiva
+    sections_meta = build_ui_sections_metadata(sections_eff)
+    checks_meta = build_ui_checks_metadata(checks_eff)
 
-    # Aplicar enabled según perfil de clínica (sobre meta)
+    # Opcionalmente, marcar enabled según perfil de clínica
     enabled_sections = set(clinic_profile.get("enabled_sections", []))
     if enabled_sections:
         for s in sections_meta:
@@ -368,9 +377,4 @@ def build_ui_config(
         "validation": validation,
         "available_getters": list_getters(),
         "recommendation_roles": RECOMMENDATION_ROLE_CONFIG,
-        "overrides": overrides_raw,          # <- para la UI
     }
-
-
-
-__all__ = ["build_ui_config"]

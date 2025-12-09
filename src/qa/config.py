@@ -2,6 +2,13 @@ from __future__ import annotations
 from typing import Any, Dict, List, TypedDict, Callable
 from typing import Optional  # si no lo tienes ya
 
+from qa.config_overrides import (
+    load_overrides,
+    save_overrides,              # por si lo quieres usar luego desde aquí
+    apply_overrides_to_configs,
+)
+
+
 def _normalize_site_key(site: Optional[str]) -> str:
     """
     Normaliza la clave de sitio a algo seguro tipo 'PROSTATE' o 'DEFAULT'.
@@ -3286,35 +3293,20 @@ UI_SECTION_METADATA: Dict[str, Dict[str, Any]] = {
 }
 
 
-def build_ui_sections_metadata_from_config(
-    section_cfg: Dict[str, Dict[str, Any]]
-) -> List[Dict[str, Any]]:
-    res: List[Dict[str, Any]] = []
-
-    for section, cfg in section_cfg.items():
-        ui_meta = UI_SECTION_METADATA.get(section, {})
-        res.append(
-            {
-                "id": section,
-                "label": cfg.get("label", section),
-                "enabled": bool(cfg.get("enabled", True)),
-                "weight": float(cfg.get("weight", 1.0)),
-                "ui_category": ui_meta.get("category", section),
-                "icon": ui_meta.get("icon", ""),
-                "order": ui_meta.get("order", 999),
-            }
-        )
-
-    res.sort(key=lambda x: x["order"])
-    return res
-
-
 def build_ui_checks_metadata_from_config(
-    check_cfg: Dict[str, Dict[str, Dict[str, Any]]]
+    checks_cfg: Optional[Dict[str, Dict[str, Any]]] = None
 ) -> List[Dict[str, Any]]:
+    """
+    Construye una lista plana de metadatos de checks para la UI.
+
+    Si checks_cfg es None, usa GLOBAL_CHECK_CONFIG (útil para debugging),
+    pero en la práctica build_ui_config le pasa la config efectiva
+    (base + overrides).
+    """
+    source = checks_cfg if checks_cfg is not None else GLOBAL_CHECK_CONFIG
     items: List[Dict[str, Any]] = []
 
-    for section, checks in check_cfg.items():
+    for section, checks in source.items():
         sec_meta = UI_SECTION_METADATA.get(section, {})
         ui_category = sec_meta.get("category", section)
 
@@ -3334,7 +3326,6 @@ def build_ui_checks_metadata_from_config(
                 }
             )
 
-    # Orden por sección y luego por id
     def _sort_key(item: Dict[str, Any]) -> tuple:
         sec = item["section"]
         sec_order = UI_SECTION_METADATA.get(sec, {}).get("order", 999)
@@ -3344,13 +3335,43 @@ def build_ui_checks_metadata_from_config(
     return items
 
 
-# Mantener los nombres antiguos para compatibilidad
-def build_ui_sections_metadata() -> List[Dict[str, Any]]:
-    return build_ui_sections_metadata_from_config(GLOBAL_SECTION_CONFIG)
+def build_ui_sections_metadata_from_config(
+    sections_cfg: Optional[Dict[str, Dict[str, Any]]] = None
+) -> List[Dict[str, Any]]:
+    """
+    Devuelve metadatos de secciones para la UI, combinando:
+      - sections_cfg (si se pasa) o GLOBAL_SECTION_CONFIG
+      - UI_SECTION_METADATA
+    """
+    source = sections_cfg if sections_cfg is not None else GLOBAL_SECTION_CONFIG
+    res: List[Dict[str, Any]] = []
+
+    for section, cfg in source.items():
+        ui_meta = UI_SECTION_METADATA.get(section, {})
+        res.append(
+            {
+                "id": section,
+                "label": cfg.get("label", section),
+                "enabled": bool(cfg.get("enabled", True)),
+                "weight": float(cfg.get("weight", 1.0)),
+                "ui_category": ui_meta.get("category", section),
+                "icon": ui_meta.get("icon", ""),
+                "order": ui_meta.get("order", 999),
+            }
+        )
+
+    res.sort(key=lambda x: x["order"])
+    return res
 
 
-def build_ui_checks_metadata() -> List[Dict[str, Any]]:
-    return build_ui_checks_metadata_from_config(GLOBAL_CHECK_CONFIG)
+
+    # Mantener los nombres antiguos para compatibilidad
+    def build_ui_sections_metadata() -> List[Dict[str, Any]]:
+        return build_ui_sections_metadata_from_config(GLOBAL_SECTION_CONFIG)
+
+
+    def build_ui_checks_metadata() -> List[Dict[str, Any]]:
+        return build_ui_checks_metadata_from_config(GLOBAL_CHECK_CONFIG)
 
 
 # ============================================================
@@ -4064,6 +4085,7 @@ def _normalize_weights_in_place(
 def build_dynamic_defaults(
     site: Optional[str] = None,
     clinic_id: Optional[str] = None,
+    use_overrides: bool = True,
 ) -> Dict[str, Any]:
     """
     Construye una vista 'efectiva' de:
@@ -4072,31 +4094,33 @@ def build_dynamic_defaults(
 
     aplicando:
       - Clonado (deepcopy)
-      - Overrides desde qa_overrides.json
+      - Overrides desde qa_overrides.json (si use_overrides=True)
       - Reglas de DYNAMIC_DEFAULTS_CONFIG
       - Normalización de pesos si corresponde
+
+    No modifica los dicts globales originales.
+
+    Devuelve:
+        {
+            "sections": { ... },
+            "checks":   { "CT": {...}, "Structures": {...}, ... },
+        }
     """
     dyn_cfg = get_dynamic_defaults_config()
 
+    # Clonamos config base
     sections = copy.deepcopy(GLOBAL_SECTION_CONFIG)
     checks = copy.deepcopy(GLOBAL_CHECK_CONFIG)
 
-    # --- A) Aplicar overrides cargados desde JSON ---
-    overrides = load_overrides()
-    apply_overrides_to_configs(sections, checks, overrides)
-
-    # --- B) Auto-disable de checks si la sección está deshabilitada ---
-    if dyn_cfg.get("auto_disable_checks_if_section_disabled", True):
-        for sec_name, sec_cfg in sections.items():
-            if not sec_cfg.get("enabled", True):
-                for ck_cfg in checks.get(sec_name, {}).values():
-                    ck_cfg["enabled"] = False
+    # 0) Aplicar overrides desde JSON si corresponde
+    if use_overrides:
+        overrides = load_overrides()
+        apply_overrides_to_configs(sections, checks, overrides)
 
     # 1) Auto-disable de checks si la sección está deshabilitada
     if dyn_cfg.get("auto_disable_checks_if_section_disabled", True):
         for sec_name, sec_cfg in sections.items():
             if not sec_cfg.get("enabled", True):
-                # Deshabilitamos todos los checks de esa sección
                 for ck_cfg in checks.get(sec_name, {}).values():
                     ck_cfg["enabled"] = False
 
@@ -4124,22 +4148,13 @@ def build_dynamic_defaults(
         for sec_checks in checks.values():
             _normalize_weights_in_place(sec_checks, weight_key="weight")
 
-    # (En el futuro: aquí podrías aplicar overrides según site / clinic_id)
+    # (En el futuro: aqui aplicarías overrides por sitio/clinic_id si quieres)
 
     return {
         "sections": sections,
         "checks": checks,
     }
 
-
-# Intentamos registrar los nuevos getters en GETTER_REGISTRY si existe
-if "GETTER_REGISTRY" in globals():
-    GETTER_REGISTRY.update(
-        {
-            "get_dynamic_defaults_config": get_dynamic_defaults_config,
-            "build_dynamic_defaults": build_dynamic_defaults,
-        }
-    )
 
 
 # ============================================================

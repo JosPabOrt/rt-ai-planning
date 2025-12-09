@@ -11,6 +11,9 @@ from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from qa.config import build_dynamic_defaults
+
+
 # ==========================================================
 # AÑADIR src/ AL PYTHONPATH (desde app/ui_fastapi/main.py)
 # ==========================================================
