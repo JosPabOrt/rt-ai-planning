@@ -1,254 +1,250 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-    <meta charset="UTF-8">
-    <title>Halcyon QA – Settings</title>
-    <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
+  <meta charset="UTF-8">
+  <title>Halcyon QA – Settings</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
 </head>
 <body>
-<div class="page">
+<div class="page" id="settings-root"
+     data-site="{{ ui_config.meta.effective_site }}"
+     data-clinic-id="{{ ui_config.meta.clinic_profile.clinic_id }}"
+     data-machine="{{ ui_config.meta.machine_profile.machine_id }}">
 
-    <!-- CABECERA -->
-    <header class="header">
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
-            <div>
-            <h1>Halcyon QA – Panel</h1>  <!-- o Settings -->
-            <p class="subtitle">Prototype · FastAPI</p>
-            </div>
-            <button id="theme_toggle" type="button" class="btn-ghost">
-            🌙 Dark mode
-            </button>
-        </div>
+  <!-- CABECERA / NAV TABS -->
+  <header class="header header-settings">
+    <div class="header-left">
+      <h1>Halcyon QA – Settings</h1>
+      <p class="subtitle">Prototype · FastAPI</p>
 
-        <nav class="nav-tabs">
-            <a href="/" class="nav-tab {% if active_tab == 'panel' %}nav-tab-active{% endif %}">Panel</a>
-            <a href="/settings" class="nav-tab {% if active_tab == 'settings' %}nav-tab-active{% endif %}">Settings</a>
-        </nav>
-    </header>
-
-    <!-- aquí el resto de tu contenido de settings -->
-    {% if error %}
-        <div class="alert alert-error">
-        <strong>Error:</strong> {{ error }}
-        </div>
-    {% endif %}
-
-    <section class="card">
-        <h2>Configuración de QA</h2>
-        <!-- … tu formulario/JSON/lo que ya tengas … -->
-    </section>
-
+      <nav class="tabs-nav">
+        <a href="/" class="tab-link">Panel</a>
+        <a href="/settings" class="tab-link tab-link-active">Settings</a>
+      </nav>
     </div>
 
-    <!-- reutiliza el mismo script de theme_toggle que tienes en index.html -->
-    <script>
-    (function () {
-        const toggle = document.getElementById('theme_toggle');
-        const body   = document.body;
-        const stored = window.localStorage.getItem('qa_theme');
-        if (stored === 'dark') {
-            body.classList.add('theme-dark');
-            if (toggle) toggle.textContent = '☀️ Light mode';
-        }
-        if (toggle) {
-            toggle.addEventListener('click', function () {
-                const isDark = body.classList.toggle('theme-dark');
-                window.localStorage.setItem('qa_theme', isDark ? 'dark' : 'light');
-                toggle.textContent = isDark ? '☀️ Light mode' : '🌙 Dark mode';
-            });
-        }
-    })();
-    </script>
+    <button id="theme_toggle" type="button" class="btn-ghost">
+      🌙 Dark mode
+    </button>
+  </header>
 
-        <!-- Selector de site / clinic (GET) -->
-        <form method="get" action="/settings" class="run-form" style="margin-top:12px;">
-            <div class="form-row">
-                <label for="site">Site clínico</label>
-                <input
-                    type="text"
-                    id="site"
-                    name="site"
-                    value="{{ site or ui_config.site or '' }}"
-                    placeholder="PROSTATE, HEADNECK, etc."
-                    required
-                >
-            </div>
-            <div class="form-row">
-                <label for="clinic_id">Perfil de clínica</label>
-                <input
-                    type="text"
-                    id="clinic_id"
-                    name="clinic_id"
-                    value="{{ clinic_id or ui_config.clinic_id or 'DEFAULT' }}"
-                    placeholder="DEFAULT u otro ID de clínica"
-                    required
-                >
-            </div>
-            <button type="submit" class="btn-primary">Cargar configuración</button>
-        </form>
-    </header>
+  <!-- BLOQUE PRINCIPAL -->
+  <main class="settings-main">
 
-    <!-- INFO GLOBAL -->
-    <section class="card summary-card">
-        <h2>Resumen de configuración actual</h2>
-        <div class="summary-grid">
-            <div>
-                <div class="summary-label">Site</div>
-                <div class="summary-value">{{ ui_config.site }}</div>
-            </div>
-            <div>
-                <div class="summary-label">Perfil de clínica</div>
-                <div class="summary-value">{{ ui_config.clinic_id }}</div>
-            </div>
-            <div>
-                <div class="summary-label">Secciones</div>
-                <div class="summary-value">
-                    {{ ui_config.sections | length }}
-                </div>
-            </div>
-            <div class="summary-mini">
-                <div class="summary-label">Nota</div>
-                <div class="summary-badges">
-                    <span class="badge badge-warn">
-                        Esta UI aún no guarda cambios (solo vista/maqueta)
-                    </span>
-                </div>
-            </div>
-        </div>
-    </section>
-
-    <!-- PESTAÑAS DE SECCIONES -->
+    <!-- CARD: Configuración de QA -->
     <section class="card">
-        <h2>Configuración por sección</h2>
+      <h2>Configuración de QA</h2>
 
-        <!-- Tabs -->
-        <div class="tabs-header" style="display:flex; gap:6px; flex-wrap:wrap; margin-bottom:10px;">
-            {% for section in ui_config.sections %}
-                <button
-                    type="button"
-                    class="btn-ghost tab-btn"
-                    data-tab-target="section-{{ section.id }}"
-                >
-                    {{ section.label or section.id }}
-                </button>
-            {% endfor %}
+      <form method="get" action="/settings" class="settings-form-row">
+        <div class="form-row inline">
+          <label for="site">Site clínico</label>
+          <input type="text" id="site" name="site"
+                 value="{{ site or ui_config.meta.effective_site }}">
         </div>
 
-        <!-- Contenido de cada sección -->
-        <div class="tabs-content">
-            {% for section in ui_config.sections %}
-                <div
-                    id="section-{{ section.id }}"
-                    class="settings-section"
-                    style="display: none;"
-                >
-                    <!-- Encabezado de sección -->
-                    <div class="card" style="margin-bottom:12px;">
-                        <h3 style="margin-top:0;">
-                            {{ section.label or section.id }}
-                        </h3>
-
-                        <div class="summary-grid">
-                            <div>
-                                <div class="summary-label">ID sección</div>
-                                <div class="summary-value">{{ section.id }}</div>
-                            </div>
-                            <div>
-                                <div class="summary-label">Enabled</div>
-                                <div class="summary-value">
-                                    <label style="display:flex; align-items:center; gap:4px;">
-                                        <input
-                                            type="checkbox"
-                                            name="section_enabled_{{ section.id }}"
-                                            {% if section.enabled %}checked{% endif %}
-                                        >
-                                        <span>Activar sección</span>
-                                    </label>
-                                </div>
-                            </div>
-                            <div>
-                                <div class="summary-label">Peso sección</div>
-                                <div class="summary-value" style="display:flex; align-items:center; gap:8px;">
-                                    <input
-                                        type="range"
-                                        min="0.0"
-                                        max="3.0"
-                                        step="0.1"
-                                        name="section_weight_{{ section.id }}"
-                                        value="{{ section.weight or 1.0 }}"
-                                        oninput="this.nextElementSibling.textContent = this.value"
-                                    >
-                                    <span>{{ section.weight or 1.0 }}</span>
-                                </div>
-                            </div>
-                            <div>
-                                <div class="summary-label">Checks en sección</div>
-                                <div class="summary-value">
-                                    {{ section.checks | length }}
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <!-- Tabla de checks de la sección -->
-                    <div class="card">
-                        <h4 style="margin-top:0;">Checks individuales</h4>
-                        <table class="qa-table">
-                            <thead>
-                            <tr>
-                                <th>Check</th>
-                                <th>Enabled</th>
-                                <th>Peso</th>
-                                <th>Descripción</th>
-                            </tr>
-                            </thead>
-                            <tbody>
-                            {% for chk in section.checks %}
-                                <tr>
-                                    <td>
-                                        <strong>{{ chk.label or chk.id }}</strong><br>
-                                        <code style="font-size:0.75rem;">{{ chk.id }}</code>
-                                    </td>
-                                    <td style="text-align:center;">
-                                        <input
-                                            type="checkbox"
-                                            name="check_enabled_{{ section.id }}_{{ chk.id }}"
-                                            {% if chk.enabled %}checked{% endif %}
-                                        >
-                                    </td>
-                                    <td style="min-width:120px;">
-                                        <input
-                                            type="number"
-                                            name="check_weight_{{ section.id }}_{{ chk.id }}"
-                                            value="{{ chk.weight or 1.0 }}"
-                                            step="0.1"
-                                            min="0.0"
-                                            max="5.0"
-                                            style="width:80px;"
-                                        >
-                                    </td>
-                                    <td>
-                                        <span style="font-size:0.9rem; color:var(--text-muted, #666);">
-                                            {{ chk.description or "—" }}
-                                        </span>
-                                    </td>
-                                </tr>
-                            {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
-
-                </div>
-            {% endfor %}
+        <div class="form-row inline">
+          <label for="clinic_id">Perfil de clínica</label>
+          <input type="text" id="clinic_id" name="clinic_id"
+                 value="{{ clinic_id or ui_config.meta.clinic_profile.clinic_id }}">
         </div>
+
+        <div class="form-row inline">
+          <label for="machine">Máquina</label>
+          <input type="text" id="machine" name="machine"
+                 value="{{ machine or ui_config.meta.machine_profile.machine_id }}">
+        </div>
+
+        <button type="submit" class="btn-primary">
+          Cargar configuración
+        </button>
+      </form>
     </section>
 
+    <!-- CARD: Resumen -->
+    <section class="card">
+      <h2>Resumen de configuración actual</h2>
+      <div class="summary-grid">
+        <div>
+          <div class="summary-label">Site</div>
+          <div class="summary-value">
+            {{ ui_config.meta.effective_site }}
+          </div>
+        </div>
+        <div>
+          <div class="summary-label">Perfil de clínica</div>
+          <div class="summary-value">
+            {{ ui_config.meta.clinic_profile.label }}
+          </div>
+        </div>
+        <div>
+          <div class="summary-label">Secciones</div>
+          <div class="summary-value">
+            {{ ui_config.sections | length }}
+          </div>
+        </div>
+        <div>
+          <div class="summary-label">Nota</div>
+          <div class="summary-value">
+            <span class="badge badge-warn">
+              Esta UI solo guarda overrides, no toca config.py.
+            </span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- CARD: Configuración por sección -->
+    <section class="card">
+      <div class="settings-header-row">
+        <h2>Configuración por sección</h2>
+        <button type="button" id="btn-save-overrides" class="btn-primary">
+          Guardar cambios
+        </button>
+      </div>
+
+      <!-- Pills de secciones -->
+      <div class="section-pills">
+        {% for sec in ui_config.sections %}
+          <button type="button"
+                  class="pill section-pill {% if loop.first %}active{% endif %}"
+                  data-section="{{ sec.id }}">
+            {{ sec.id }}
+          </button>
+        {% endfor %}
+      </div>
+
+      <!-- Detalle de cada sección -->
+      {% for sec in ui_config.sections %}
+      <div class="section-card {% if not loop.first %}hidden{% endif %}"
+           data-section="{{ sec.id }}">
+        <h3>{{ sec.label }}</h3>
+
+        <div class="section-meta-grid">
+          <div>
+            <div class="summary-label">ID sección</div>
+            <div class="summary-value">{{ sec.id }}</div>
+          </div>
+          <div>
+            <div class="summary-label">Enabled</div>
+            <div class="summary-value">
+              <label class="inline">
+                <input type="checkbox"
+                       class="section-enabled"
+                       {% if sec.enabled %}checked{% endif %}>
+                Activar sección
+              </label>
+            </div>
+          </div>
+          <div>
+            <div class="summary-label">Peso sección</div>
+            <div class="summary-value">
+              <input type="number"
+                     class="section-weight"
+                     step="0.01"
+                     min="0"
+                     max="5"
+                     value="{{ '%.2f'|format(sec.weight) }}">
+            </div>
+          </div>
+          <div>
+            <div class="summary-label">Checks en sección</div>
+            <div class="summary-value">
+              {{
+                ui_config.checks
+                | selectattr("section", "equalto", sec.id)
+                | list
+                | length
+              }}
+            </div>
+          </div>
+        </div>
+
+        <!-- Tabla de checks individuales de esta sección -->
+        <h4>Checks individuales</h4>
+
+        <table class="qa-table settings-checks-table">
+          <thead>
+          <tr>
+            <th>Check</th>
+            <th>Enabled</th>
+            <th>Peso</th>
+            <th>Descripción</th>
+          </tr>
+          </thead>
+          <tbody>
+          {% for ck in ui_config.checks if ck.section == sec.id %}
+            <tr class="settings-check-row"
+                data-section="{{ sec.id }}"
+                data-check-id="{{ ck.id }}">
+              <td>
+                <strong>{{ ck.label }}</strong><br>
+                <small>{{ ck.check_key }}</small>
+              </td>
+              <td class="col-enabled">
+                <input type="checkbox"
+                       class="check-enabled"
+                       {% if ck.enabled %}checked{% endif %}>
+              </td>
+              <td class="col-weight">
+                <input type="number"
+                       class="check-weight"
+                       step="0.1"
+                       min="0"
+                       max="5"
+                       value="{{ '%.1f'|format(ck.weight) }}">
+              </td>
+              <td class="col-desc">
+                <input type="text"
+                       class="check-desc"
+                       value="{{ ck.description or '' }}">
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+
+      </div>
+      {% endfor %}
+    </section>
+
+    <!-- CARD: Estado de validación -->
+    <section class="card">
+      <h2>Estado de validación de la config</h2>
+      <p>
+        ok: <strong>{{ ui_config.validation.ok }}</strong><br>
+        errors: {{ ui_config.validation.errors | length }} ·
+        warnings: {{ ui_config.validation.warnings | length }}
+      </p>
+
+      {% if ui_config.validation.errors %}
+        <details open>
+          <summary>Errores</summary>
+          <ul>
+            {% for e in ui_config.validation.errors %}
+              <li>{{ e }}</li>
+            {% endfor %}
+          </ul>
+        </details>
+      {% endif %}
+
+      {% if ui_config.validation.warnings %}
+        <details>
+          <summary>Warnings</summary>
+          <ul>
+            {% for w in ui_config.validation.warnings %}
+              <li>{{ w }}</li>
+            {% endfor %}
+          </ul>
+        </details>
+      {% endif %}
+    </section>
+
+  </main>
 </div>
 
-<!-- Script tabs + tema oscuro -->
+<!-- ================== JS MODO OSCURO ================== -->
 <script>
   (function () {
-      // ====== Dark mode (igual que en index.html) ======
       const toggle = document.getElementById('theme_toggle');
       const body   = document.body;
 
@@ -265,60 +261,117 @@
               toggle.textContent = isDark ? '☀️ Light mode' : '🌙 Dark mode';
           });
       }
+  })();
+</script>
 
-      // ====== Tabs de secciones ======
-      const tabButtons = document.querySelectorAll('.tab-btn');
-      const sections   = document.querySelectorAll('.settings-section');
+<!-- ================== JS SETTINGS ================== -->
+<script>
+document.addEventListener("DOMContentLoaded", function () {
+  const root = document.getElementById("settings-root");
+  const saveBtn = document.getElementById("btn-save-overrides");
 
-      function showSection(id) {
-          sections.forEach(sec => {
-              sec.style.display = (sec.id === id) ? '' : 'none';
-          });
-          tabButtons.forEach(btn => {
-              if (btn.dataset.tabTarget === id) {
-                  btn.classList.add('tab-btn-active');
-              } else {
-                  btn.classList.remove('tab-btn-active');
-              }
-          });
-      }
+  // --- Navegación por sección (pills) ---
+  const pills = document.querySelectorAll(".section-pill");
+  const sectionCards = document.querySelectorAll(".section-card");
 
-      // Activar la primera sección por defecto
-      if (sections.length > 0) {
-          const firstId = sections[0].id;
-          showSection(firstId);
-      }
+  pills.forEach(pill => {
+    pill.addEventListener("click", () => {
+      const secId = pill.dataset.section;
 
-      tabButtons.forEach(btn => {
-          btn.addEventListener('click', () => {
-              const target = btn.dataset.tabTarget;
-              if (target) showSection(target);
-          });
+      pills.forEach(p => p.classList.remove("active"));
+      pill.classList.add("active");
+
+      sectionCards.forEach(card => {
+        if (card.dataset.section === secId) {
+          card.classList.remove("hidden");
+        } else {
+          card.classList.add("hidden");
+        }
       });
-  })();
-</script>
+    });
+  });
 
-<script>
-  (function () {
-      const toggle = document.getElementById('theme_toggle');
-      const body   = document.body;
+  // --- Recolectar overrides desde la UI ---
+  function collectOverrides() {
+    const sections = {};
+    const checks = {};
 
-      const stored = window.localStorage.getItem('qa_theme');
-      if (stored === 'dark') {
-          body.classList.add('theme-dark');
-          if (toggle) toggle.textContent = '☀️ Light mode';
+    // Secciones
+    sectionCards.forEach(card => {
+      const secId = card.dataset.section;
+      const enabledInput = card.querySelector(".section-enabled");
+      const weightInput  = card.querySelector(".section-weight");
+
+      sections[secId] = {
+        enabled: enabledInput ? enabledInput.checked : true,
+        weight:  weightInput ? parseFloat(weightInput.value || "0") : 1.0,
+      };
+    });
+
+    // Checks
+    const checkRows = document.querySelectorAll(".settings-check-row");
+    checkRows.forEach(row => {
+      const checkId = row.dataset.checkId;
+      const enabled = row.querySelector(".check-enabled");
+      const weight  = row.querySelector(".check-weight");
+      const desc    = row.querySelector(".check-desc");
+
+      checks[checkId] = {
+        enabled: enabled ? enabled.checked : true,
+        weight:  weight ? parseFloat(weight.value || "0") : 1.0,
+        description: desc ? desc.value : "",
+      };
+    });
+
+    return { sections, checks };
+  }
+
+  // --- Guardar (POST /api/settings/save) ---
+  async function saveOverrides() {
+    if (!root) return;
+
+    const meta = {
+      site: root.dataset.site || "PROSTATE",
+      clinic_id: root.dataset.clinicId || "DEFAULT",
+      machine: root.dataset.machine || "HALCYON",
+    };
+
+    const overrides = collectOverrides();
+
+    const payload = {
+      ...meta,
+      sections: overrides.sections,
+      checks: overrides.checks,
+    };
+
+    try {
+      const resp = await fetch("/api/settings/save", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (!resp.ok) {
+        throw new Error("Error HTTP " + resp.status);
       }
 
-      if (toggle) {
-          toggle.addEventListener('click', function () {
-              const isDark = body.classList.toggle('theme-dark');
-              window.localStorage.setItem('qa_theme', isDark ? 'dark' : 'light');
-              toggle.textContent = isDark ? '☀️ Light mode' : '🌙 Dark mode';
-          });
-      }
-  })();
-</script>
+      const data = await resp.json();
+      console.log("Overrides guardados:", data);
 
+      alert("Overrides guardados en qa_overrides.json");
+    } catch (err) {
+      console.error(err);
+      alert("Error al guardar overrides: " + err.message);
+    }
+  }
+
+  if (saveBtn) {
+    saveBtn.addEventListener("click", saveOverrides);
+  }
+});
+</script>
 
 </body>
 </html>

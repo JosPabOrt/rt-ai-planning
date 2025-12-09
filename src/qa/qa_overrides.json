@@ -1,0 +1,151 @@
+{
+  "sections": {
+    "CT": {
+      "enabled": true,
+      "weight": 0.25
+    },
+    "Structures": {
+      "enabled": true,
+      "weight": 0.25
+    },
+    "Plan": {
+      "enabled": true,
+      "weight": 0.25
+    },
+    "Dose": {
+      "enabled": true,
+      "weight": 0.25
+    },
+    "Other": {
+      "enabled": false,
+      "weight": 0
+    }
+  },
+  "checks": {
+    "CT.CT_CLIPPING": {
+      "enabled": true,
+      "weight": 1,
+      "description": "Clipping del paciente en bordes de FOV."
+    },
+    "CT.CT_COUCH": {
+      "enabled": true,
+      "weight": 1,
+      "description": "Presencia/ausencia de mesa según protocolo."
+    },
+    "CT.CT_FOV": {
+      "enabled": true,
+      "weight": 1,
+      "description": "FOV mínimo para evitar clipping por campo de visión reducido."
+    },
+    "CT.CT_GEOMETRY": {
+      "enabled": true,
+      "weight": 1,
+      "description": "Dimensionalidad, número de cortes y spacing del CT."
+    },
+    "CT.CT_HU": {
+      "enabled": true,
+      "weight": 1,
+      "description": "HU de aire y agua/tejido blando dentro de tolerancias."
+    },
+    "Structures.DUPLICATE_STRUCTURES": {
+      "enabled": true,
+      "weight": 0.5,
+      "description": "Detección de estructuras duplicadas por órgano."
+    },
+    "Structures.LATERALITY": {
+      "enabled": true,
+      "weight": 0.5,
+      "description": "Consistencia de volúmenes izquierda/derecha."
+    },
+    "Structures.MANDATORY_STRUCTURES": {
+      "enabled": true,
+      "weight": 1.5,
+      "description": "BODY, PTV y OARs obligatorios presentes."
+    },
+    "Structures.PTV_INSIDE_BODY": {
+      "enabled": true,
+      "weight": 1.5,
+      "description": "Fracción del PTV fuera de BODY por debajo del umbral."
+    },
+    "Structures.PTV_VOLUME": {
+      "enabled": true,
+      "weight": 1,
+      "description": "Volumen del PTV en rango razonable."
+    },
+    "Structures.STRUCT_OVERLAP": {
+      "enabled": true,
+      "weight": 0.5,
+      "description": "Solape volumétrico PTV–OAR dentro de rangos configurados."
+    },
+    "Plan.ANGULAR_PATTERN": {
+      "enabled": true,
+      "weight": 1,
+      "description": "Patrones angulares IMRT/3D-CRT/VMAT según técnica y sitio."
+    },
+    "Plan.BEAM_GEOM": {
+      "enabled": true,
+      "weight": 1,
+      "description": "Número de arcos, ángulos de mesa y colimador, cobertura angular."
+    },
+    "Plan.FRACTIONATION": {
+      "enabled": true,
+      "weight": 0.5,
+      "description": "Esquema de dosis/fracciones compatible con esquemas típicos."
+    },
+    "Plan.ISO_PTV": {
+      "enabled": true,
+      "weight": 1,
+      "description": "Distancia isocentro–PTV dentro del umbral configurado."
+    },
+    "Plan.PLAN_MODULATION": {
+      "enabled": true,
+      "weight": 0.8,
+      "description": "Complejidad/modulación del plan (CP, aperturas MLC)."
+    },
+    "Plan.PLAN_MU": {
+      "enabled": true,
+      "weight": 0.8,
+      "description": "MU totales y MU/Gy dentro del rango esperado."
+    },
+    "Plan.PLAN_TECH": {
+      "enabled": true,
+      "weight": 1,
+      "description": "Técnica, energía y nº de beams/arcos según protocolo."
+    },
+    "Plan.PRESCRIPTION": {
+      "enabled": true,
+      "weight": 1,
+      "description": "Consistencia entre dosis total, fracciones y DVH del PTV."
+    },
+    "Dose.DOSE_LOADED": {
+      "enabled": false,
+      "weight": 1,
+      "description": "RTDOSE presente y alineado con el CT."
+    },
+    "Dose.GLOBAL_HOTSPOTS": {
+      "enabled": true,
+      "weight": 1.2,
+      "description": "Dmax y Vhot globales dentro de límites."
+    },
+    "Dose.OAR_DVH_BASIC": {
+      "enabled": true,
+      "weight": 1.5,
+      "description": "Cumplimiento de DVH básicos de OARs (recto, vejiga, femorales...)."
+    },
+    "Dose.PTV_CONFORMITY": {
+      "enabled": true,
+      "weight": 1,
+      "description": "Índice de conformidad de Paddick para el PTV."
+    },
+    "Dose.PTV_COVERAGE": {
+      "enabled": true,
+      "weight": 1.5,
+      "description": "Cobertura D95 del PTV respecto a la prescripción."
+    },
+    "Dose.PTV_HOMOGENEITY": {
+      "enabled": true,
+      "weight": 1,
+      "description": "Índices de homogeneidad del PTV (HI_RTOG, (D2–D98)/D50)."
+    }
+  }
+}
